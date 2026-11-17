@@ -6,8 +6,8 @@
 # Outside BLE mode nothing here touches the display: the board is the plain
 # USB PiBody.
 #
-# In BLE mode a 16 px bar at the top shows the Bluetooth state, the board name
-# and a running dot. The st7789 driver keeps it on top: drawing into the bar
+# In BLE mode a 16 px bar at the top shows the Bluetooth state, the board name,
+# the Wi-Fi state (only while Wi-Fi is on) and a running dot. The st7789 driver keeps it on top: drawing into the bar
 # rows is dropped (st7789._overlay). Programs control it with display.bar:
 #   display.bar.show()     full bar (default)
 #   display.bar.dot()      a single status dot in the top-right corner
@@ -174,12 +174,71 @@ def _paint_running(v):
         _d.fill_circle(x + 7, 7, 3, GREEN)
 
 
-def _paint_bar(v):
+# Wi-Fi icon states (_wifi_state)
+WIFI_OFF, WIFI_IDLE, WIFI_JOIN, WIFI_UP, WIFI_FAIL, WIFI_SETUP = range(6)
+WIFI_X = DOT[0] - 17
+_wlan = None
+_fan = None
+
+
+def _wifi_state():
+    """Wi-Fi state from the driver's flags only (no radio traffic): safe here."""
+    global _wlan
+    try:
+        if _wlan is None:
+            import network
+            _wlan = (network.WLAN(network.STA_IF), network.WLAN(network.AP_IF))
+        sta, ap = _wlan
+        if ap.active():
+            return WIFI_SETUP
+        if not sta.active():
+            return WIFI_OFF
+        s = sta.status()
+        if s == 3:
+            return WIFI_UP
+        if s in (1, 2):
+            return WIFI_JOIN
+        return WIFI_FAIL if s < 0 else WIFI_IDLE
+    except Exception:
+        return WIFI_OFF
+
+
+def _fan_shapes():
+    """Wi-Fi fan polygons (two arcs and a dot), float points, for fill_shapes."""
+    import math
+    cx, cy = WIFI_X + 7.5, 12.5
+    k = math.pi / 180
+
+    def sector(r0, r1):
+        out = [(cx + r1 * math.cos(k * a), cy - r1 * math.sin(k * a)) for a in range(45, 136, 9)]
+        out += [(cx + r0 * math.cos(k * a), cy - r0 * math.sin(k * a)) for a in range(135, 44, -9)]
+        return out
+    dot = [(cx + 1.9 * math.cos(k * a), cy - 1.9 * math.sin(k * a)) for a in range(0, 360, 30)]
+    return (sector(7.6, 10.2), sector(3.8, 6.3), dot)
+
+
+def _paint_wifi(w):
+    global _fan
+    if w == WIFI_OFF:
+        _d.fill_rect(WIFI_X, 0, 16, BAR_H - 1, WHITE)
+        return
+    if _fan is None:
+        _fan = _fan_shapes()
+    color = {WIFI_IDLE: GREY_BADGE, WIFI_JOIN: AMBER, WIFI_UP: INK,
+             WIFI_FAIL: RED, WIFI_SETUP: BLUE}[w]
+    # the outer arc pale while joining or idle: one bar of "signal" less
+    outer = GREY_BADGE if w in (WIFI_IDLE, WIFI_JOIN) else color
+    _d.fill_shapes(WIFI_X, 0, 16, BAR_H - 1, WHITE,
+                   ((_fan[0], outer), (_fan[1], color), (_fan[2], color)))
+
+
+def _paint_bar(v, w=WIFI_OFF):
     _d.fill_rect(0, 0, W, BAR_H - 1, WHITE)
     _text(_name[:24], 40, 0, _fonts.small, INK, WHITE)
     _d.hline(0, BAR_H - 1, W, INK)
     _paint_icon(v)
     _paint_link(v)
+    _paint_wifi(w)
     _paint_running(v)
 
 
@@ -222,12 +281,12 @@ def _clear_bar_area():
     _d.fill_rect(0, 0, W, BAR_H, bg)
 
 
-def _paint(v, full):
+def _paint(v, full, w=WIFI_OFF):
     _bypass(True)
     try:
         if _mode == "full":
             if full:
-                _paint_bar(v)
+                _paint_bar(v, w)
             else:
                 _paint_icon(v)
             if _logo and full:
@@ -328,10 +387,11 @@ def _tick(_t=None):
         if dirty and _logo:
             _logo = False  # user code drew or reset the panel
             _apply_overlay()
-        key = v & 0x3F
+        w = _wifi_state() if _mode == "full" else WIFI_OFF
+        key = (v & 0x3F) | w << 8
         if dirty or key != _last:
             _last = key
-            _paint(v, True)
+            _paint(v, True, w)
         elif blink_changed:
             _paint(v, False)
     except Exception as e:
@@ -404,14 +464,15 @@ def status(cfg, entered=False):
     _panel()
     _mode = "full"
     _logo = bool(entered)
-    _last = v & 0x3F
+    w = _wifi_state()
+    _last = (v & 0x3F) | w << 8
     _bypass(True)
     try:
         if _logo:
             _paint_logo(v)
         else:
             _d.fill(BLACK)
-        _paint_bar(v)
+        _paint_bar(v, w)
     finally:
         _bypass(False)
     st7789._overlay_dirty()  # our own init/fill

@@ -424,6 +424,28 @@ def _make_bleterm():
     return m
 
 
+def _make_network():
+    """Wi-Fi flags only (what the bar reads): WLAN(i).active(), .status()."""
+    m = types.ModuleType("network")
+    m.STA_IF, m.AP_IF = 0, 1
+    m.flags = {0: [False, 0], 1: [False, 0]}  # itf: [active, status]
+
+    class WLAN:
+        def __init__(self, itf=0):
+            self.itf = itf
+
+        def active(self, *a):
+            if a:
+                m.flags[self.itf][0] = bool(a[0])
+            return m.flags[self.itf][0]
+
+        def status(self, *a):
+            return m.flags[self.itf][1]
+
+    m.WLAN = WLAN
+    return m
+
+
 # --- PNG ------------------------------------------------------------------------
 
 def _rgb(c):
@@ -466,6 +488,7 @@ class Board:
         sys.modules["micropython"] = _make_micropython()
         sys.modules["framebuf"] = _make_framebuf()
         self.bt = sys.modules["bleterm"] = _make_bleterm()
+        self.net = sys.modules["network"] = _make_network()
         for p in (MODULES, libs):
             if p and p not in sys.path:
                 sys.path.insert(0, p)
@@ -474,6 +497,10 @@ class Board:
 
     def state(self, v):
         self.bt.state = v
+
+    def wifi(self, sta=False, status=0, ap=False):
+        self.net.flags[0][:] = [sta, status]
+        self.net.flags[1][:] = [ap, 0]
 
     def tick(self, n=1):
         for _ in range(n):
@@ -578,6 +605,34 @@ def scenarios(libs):
         c.fill_rect(60, 30, 40, 30, d.CYAN)
         c.show(60, 120)
         out.append(("canvas", bd.frame()))
+
+    # Wi-Fi icon on the bar: each state's bar, stacked
+    bd = Board(libs)
+    bd.state(STARTED | LINK | AUTH | IDLE)
+    bd.b.status(cfg, False)
+    rows = [[0] * W for _ in range(H)]
+    for i, (sta, st, ap) in enumerate(((False, 0, False), (True, 0, False), (True, 1, False),
+                                       (True, 3, False), (True, -3, False), (False, 0, True))):
+        bd.wifi(sta, st, ap)
+        bd.tick()
+        f = bd.frame()
+        for r in range(16):
+            rows[8 + i * 24 + r] = f[r][:]
+    out.append(("wifi: off,idle,join,up,fail,setup", rows))
+    # pibody.wifi_setup() screen (QR code to join the board's setup network)
+    if libs:
+        bd = Board(libs)
+        bd.state(STARTED | LINK | AUTH | IDLE)
+        bd.b.status(cfg, False)
+        from pibody.IOT.WiFiSetup import _Setup
+        su = _Setup()
+        su.key = "48213907"
+        su.show_join()
+        bd.wifi(True, 0, True)
+        bd.tick()
+        out.append(("wifi_setup()", bd.frame()))
+        su.show_join("Wi-Fi: wrong password for 'Home'.".replace("Wi-Fi: ", ""))
+        out.append(("wifi_setup(): failed", bd.frame()))
 
     # button-hold feedback screens
     import io

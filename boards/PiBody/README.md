@@ -51,7 +51,10 @@ make                   # build/PiBody/firmware.uf2
     pairing stays open by itself.
 - **Top bar** (BLE mode only): 16 px at the top: Bluetooth icon (blinking while
   pairing is open, steady when paired, with a green link mark while the IDE is
-  connected), board name, green dot while a program runs. The ST7789 driver
+  connected), board name, Wi-Fi icon while Wi-Fi is on (grey: on, amber:
+  connecting, dark: connected, red: connect failed, blue: pibody
+  `wifi_setup()` running; read from the driver's flags, no radio traffic),
+  green dot while a program runs. The ST7789 driver
   drops drawing into those rows, so programs keep 240x320 coordinates.
   `display.bar.show()`, `.dot()` (one status dot in the corner), `.hide()`,
   `.retreat()` (hidden until the program ends), `.height`, `.mode`.
@@ -94,7 +97,9 @@ make                   # build/PiBody/firmware.uf2
   `swift tools/makefont.swift Roboto-Regular.ttf h16 modules/DisplayBase/sans16.py`
   (h20 sans20, h24 sans24; Roboto-Bold.ttf h32 sans32b)
 - `tools/screensim.py`: renders the BLE screens, the bar and pibody Display
-  code to PNGs on the host (fake st7789), so the look can be checked without a board
+  code to PNGs on the host (fake st7789, network), so the look can be checked
+  without a board. Needs Python 3.10 or newer:
+  `python3.13 tools/screensim.py [OUTDIR]`
 - `cmodules/st7789/st7789.c`: DMA SPI layer (`spi_start`/`spi_wait`, hot
   functions in RAM), `fill_shapes` (fixed-point edge list, 4x4 anti-aliasing),
   `blit_framebuf`, `spi_clock()`; overlay clip (`_overlay`, `_overlay_bypass`, `_overlay_dirty`) keeping the bar on top
