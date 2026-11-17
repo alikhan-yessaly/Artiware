@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: alikhanyessaly <alikhan.yessaly@quantum.edu.kz>
+Date: Tue, 17 Nov 2026 08:30:56 +0500
+Subject: [PATCH 3/7] rp2: btstack config for bleterm
+
+MAX_ATT_DB_SIZE 1024 and ENABLE_ATT_DELAYED_RESPONSE.
+---
+ ports/rp2/btstack_inc/btstack_config.h | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/ports/rp2/btstack_inc/btstack_config.h b/ports/rp2/btstack_inc/btstack_config.h
+index ec7cd7fb7..3a405a159 100644
+--- a/ports/rp2/btstack_inc/btstack_config.h
++++ b/ports/rp2/btstack_inc/btstack_config.h
+@@ -6,4 +6,13 @@
+ 
+ #include "btstack_config_common.h"
+ 
++// Pico W BLE IDE (board PICOW_BLE): the bleterm system block (GAP, GATT,
++// NUS, PBL) shares the ATT DB with user services.
++#undef MAX_ATT_DB_SIZE
++#define MAX_ATT_DB_SIZE 1024
++
++// NUS input flow control: a write with response is answered once the bytes
++// fit in stdin (ATT_ERROR_WRITE_RESPONSE_PENDING / att_server_response_ready).
++#define ENABLE_ATT_DELAYED_RESPONSE
++
+ #endif

@@ -1,8 +1,7 @@
 // Board and hardware specific configuration
 #define MICROPY_HW_BOARD_NAME                   "Raspberry Pi Pico W"
 
-// todo: We need something to check our binary size
-#define MICROPY_HW_FLASH_STORAGE_BYTES          (848 * 1024)
+// Filesystem size: set in mpconfigboard.cmake (MicroPython >= 1.29 checks it at link time).
 
 // Enable networking.
 #define MICROPY_PY_NETWORK 1
@@ -24,4 +23,15 @@
 int mp_hal_is_pin_reserved(int n);
 #define MICROPY_HW_PIN_RESERVED(i) mp_hal_is_pin_reserved(i)
 
-#define MICROPY_BANNER_MACHINE "PiBody v1.1"
+#define MICROPY_BANNER_MACHINE "PiBody v1.1 (BLE REPL) with RP2040"
+
+// --- BLE REPL (bleterm) ---
+// stdin ring shared by USB and the BLE terminal (raw-paste window is derived from it).
+#define MICROPY_HW_STDIN_BUFFER_LEN             2048
+#define MICROPY_PY_BLUETOOTH_DEFAULT_GAP_NAME   "PiBody"
+#define MICROPY_BLETERM_NAME_PREFIX             "PiBody"
+
+// BLE terminal: stdio hooks, system ATT services, stack kept up across soft reset.
+#define MICROPY_PY_BLETERM                      (1)
+#define MICROPY_BOARD_START_SOFT_RESET() \
+    do { extern void bleterm_soft_reset_begin(void); bleterm_soft_reset_begin(); } while (0)

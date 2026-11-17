@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: alikhanyessaly <alikhan.yessaly@quantum.edu.kz>
+Date: Tue, 17 Nov 2026 08:31:14 +0500
+Subject: [PATCH 5/7] rp2: run _bleboot and skip boot.py/main.py in safe mode
+
+---
+ ports/rp2/main.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/ports/rp2/main.c b/ports/rp2/main.c
+index 03c4e5d02..fef0be8a2 100644
+--- a/ports/rp2/main.c
++++ b/ports/rp2/main.c
+@@ -244,8 +244,18 @@ int main(int argc, char **argv) {
+         pyexec_frozen_module("_boot.py", false);
+         #endif
+ 
++        #if MICROPY_PY_BLETERM
++        // Boot control: button, /ble_config.json, bleterm.start().
++        pyexec_frozen_module("_bleboot.py", false);
++        #endif
++
+         // Execute user scripts.
++        #if MICROPY_PY_BLETERM
++        // Safe mode (button held at boot) skips boot.py and main.py.
++        int ret = bleterm_safe_mode() ? 1 : pyexec_file_if_exists("boot.py");
++        #else
+         int ret = pyexec_file_if_exists("boot.py");
++        #endif
+ 
+         #if MICROPY_HW_ENABLE_USBDEV
+         mp_usbd_init();
+@@ -254,6 +264,11 @@ int main(int argc, char **argv) {
+         if (ret & PYEXEC_FORCED_EXIT) {
+             goto soft_reset_exit;
+         }
++        #if MICROPY_PY_BLETERM
++        if (bleterm_safe_mode()) {
++            ret = 0;
++        }
++        #endif
+         if (pyexec_mode_kind == PYEXEC_MODE_FRIENDLY_REPL && ret != 0) {
+             ret = pyexec_file_if_exists("main.py");
+             if (ret & PYEXEC_FORCED_EXIT) {

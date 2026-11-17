@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: alikhanyessaly <alikhan.yessaly@quantum.edu.kz>
+Date: Tue, 17 Nov 2026 08:30:56 +0500
+Subject: [PATCH 4/7] rp2: soft reset with BLE kept up
+
+Call bleterm_vm_ready() after mp_bluetooth_hci_init(), and initialise the
+static HCI soft timer only once (it may still be queued after a soft reset).
+---
+ ports/rp2/main.c        | 11 +++++++++++
+ ports/rp2/mpbthciport.c | 10 ++++++++++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/ports/rp2/main.c b/ports/rp2/main.c
+index f43c85eee..03c4e5d02 100644
+--- a/ports/rp2/main.c
++++ b/ports/rp2/main.c
+@@ -59,6 +59,13 @@
+ #if MICROPY_PY_NETWORK_CYW43
+ #include "lib/cyw43-driver/src/cyw43.h"
+ #endif
++
++#ifndef MICROPY_PY_BLETERM
++#define MICROPY_PY_BLETERM (0)
++#endif
++#if MICROPY_PY_BLETERM
++#include "bleterm.h"
++#endif
+ #if PICO_RP2040
+ #include "RP2040.h" // cmsis, for PendSV_IRQn and SCB/SCB_SCR_SEVONPEND_Msk
+ #elif PICO_RP2350 && PICO_ARM
+@@ -219,6 +226,10 @@ int main(int argc, char **argv) {
+         #if MICROPY_PY_BLUETOOTH
+         mp_bluetooth_hci_init();
+         #endif
++        #if MICROPY_PY_BLETERM
++        // BLE terminal: resume after a soft reset (link kept up).
++        bleterm_vm_ready();
++        #endif
+         #if MICROPY_PY_NETWORK
+         mod_network_init();
+         #endif
+diff --git a/ports/rp2/mpbthciport.c b/ports/rp2/mpbthciport.c
+index 011230462..06f12b12a 100644
+--- a/ports/rp2/mpbthciport.c
++++ b/ports/rp2/mpbthciport.c
+@@ -51,6 +51,16 @@ static void mp_bluetooth_hci_soft_timer_callback(soft_timer_entry_t *self) {
+ }
+ 
+ void mp_bluetooth_hci_init(void) {
++    #if MICROPY_PY_BLETERM
++    // The timer is static and soft_timer_deinit() keeps static entries, so it
++    // may still be queued when the stack stays up across a soft reset.
++    // Re-initialising a queued entry would corrupt the soft-timer heap.
++    static bool hci_timer_initialised = false;
++    if (hci_timer_initialised) {
++        return;
++    }
++    hci_timer_initialised = true;
++    #endif
+     soft_timer_static_init(
+         &mp_bluetooth_hci_soft_timer,
+         SOFT_TIMER_MODE_ONE_SHOT,

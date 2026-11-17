@@ -24,7 +24,16 @@ class DisplayBase(st7789.ST7789):
             cls._instance._initialized = False
         return cls._instance
 
+    # Set by the BLE status screen (_bleboard.py) while it shows on the display.
+    # The first DisplayBase() from user code calls it once: the status screen
+    # stops and clears, and the display belongs to the user from then on.
+    _on_claim = None
+
     def __init__(self):
+        cb = DisplayBase._on_claim
+        if cb is not None:
+            DisplayBase._on_claim = None
+            cb()
         if self._initialized:
             return
         self._initialized = True

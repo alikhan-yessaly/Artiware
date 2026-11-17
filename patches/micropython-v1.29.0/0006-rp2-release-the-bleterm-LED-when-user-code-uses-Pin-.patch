@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: alikhanyessaly <alikhan.yessaly@quantum.edu.kz>
+Date: Tue, 17 Nov 2026 08:44:58 +0500
+Subject: [PATCH 6/7] rp2: release the bleterm LED when user code uses
+ Pin("LED")
+
+---
+ ports/rp2/machine_pin_cyw43.c | 24 +++++++++++++++++++++++-
+ 1 file changed, 23 insertions(+), 1 deletion(-)
+
+diff --git a/ports/rp2/machine_pin_cyw43.c b/ports/rp2/machine_pin_cyw43.c
+index f79d932f7..b4c3a8f30 100644
+--- a/ports/rp2/machine_pin_cyw43.c
++++ b/ports/rp2/machine_pin_cyw43.c
+@@ -36,11 +36,28 @@
+ #include "machine_pin.h"
+ #include "lib/cyw43-driver/src/cyw43.h"
+ 
++#if MICROPY_PY_BLETERM
++// bleterm drives the LED (CYW43 GPIO 0) for its status until user code uses Pin("LED").
++#include "bleterm.h"
++#ifndef CYW43_WL_GPIO_LED_PIN
++#define CYW43_WL_GPIO_LED_PIN 0
++#endif
++#define PIN_IS_BLETERM_LED(self) ((self)->id == CYW43_WL_GPIO_LED_PIN)
++#else
++#define PIN_IS_BLETERM_LED(self) (0)
++#endif
++
+ void machine_pin_ext_init(void) {
+ }
+ 
+ void machine_pin_ext_set(machine_pin_obj_t *self, bool value) {
+-    if (value != self->last_output_value || !self->is_output) {
++    #if MICROPY_PY_BLETERM
++    if (PIN_IS_BLETERM_LED(self)) {
++        bleterm_led_release();
++    }
++    #endif
++    // The cached value is stale for the LED once bleterm has driven it: always write.
++    if (value != self->last_output_value || !self->is_output || PIN_IS_BLETERM_LED(self)) {
+         cyw43_gpio_set(&cyw43_state, self->id, value);
+     }
+     self->last_output_value = value;
+@@ -53,6 +70,11 @@ bool machine_pin_ext_get(machine_pin_obj_t *self) {
+ }
+ 
+ void machine_pin_ext_config(machine_pin_obj_t *self, int mode, int value) {
++    #if MICROPY_PY_BLETERM
++    if (PIN_IS_BLETERM_LED(self)) {
++        bleterm_led_release();
++    }
++    #endif
+     if (mode == MACHINE_PIN_MODE_IN) {
+         if (self->is_output) {
+             // TODO need to disable output
