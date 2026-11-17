@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: alikhanyessaly <alikhan.yessaly@quantum.edu.kz>
 Date: Tue, 17 Nov 2026 08:47:16 +0500
-Subject: [PATCH 7/7] rp2: btstack config for three BLE connections
+Subject: [PATCH 7/8] rp2: btstack config for three BLE connections
 
 ---
  ports/rp2/btstack_inc/btstack_config.h | 10 ++++++++++

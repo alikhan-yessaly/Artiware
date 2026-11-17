@@ -11,9 +11,10 @@ DEFAULTS = {
     "button_active_high": False,
 }
 
-# Optional board module (e.g. PiBody): DEFAULTS overrides and extra keys, and
-# hooks config(cfg) after loading the config, feedback(stage) during the button
-# hold and status(cfg) after the start.
+# Optional board module (e.g. PiBody): DEFAULTS overrides and extra keys,
+# TOGGLE (a 1 s hold switches the saved BLE mode, see decide_toggle), and hooks
+# config(cfg) after loading the config, feedback(stage) during the button hold
+# and status(cfg, entered) after the start.
 try:
     import _bleboard
 except ImportError:
@@ -24,6 +25,7 @@ if _bleboard is not None:
 CONFIG_PATH = "/ble_config.json"
 SAFE_MS = 1000
 PAIR_MS = 5000
+UNPAIRED_S = 7 * 24 * 3600  # toggle boards: pairing stays open until the first computer pairs
 
 
 def _valid(key, v):
@@ -113,6 +115,23 @@ def decide(cfg, held_ms, session, running):
     return safe, pairing, start
 
 
+def decide_toggle(cfg, held_ms, session, running):
+    """Toggle boards: return (skip_main, pairing, start, on_boot).
+
+    1-5 s hold flips the saved BLE mode (ble_on_boot); the boot that turns it on
+    skips boot.py/main.py and waits for the IDE, the one that turns it off is a
+    normal boot. 5 s: BLE mode on with the pairing window open. No hold: BLE
+    follows the saved mode and main.py runs. on_boot is the value to save, or
+    None to keep it."""
+    on = cfg["ble_on_boot"]
+    if held_ms >= PAIR_MS:
+        return True, True, True, True
+    if held_ms >= SAFE_MS:
+        on = not on
+        return on, False, on or session or running, on
+    return False, False, on or session or running, None
+
+
 def pressed(value, active_high):
     """Pin level -> button pressed. Active low (default) uses the internal pull-up,
     active high the internal pull-down."""
@@ -184,17 +203,31 @@ def main():
             print("_bleboot: button:", e)
         bleterm._led_reclaim()  # _button may have used Pin("LED")
     running = bleterm.status()["state"] != "off"
-    safe, pairing, start = decide(cfg, held, bleterm.session(), running)
+    toggle = getattr(_bleboard, "TOGGLE", False)
+    if toggle:
+        safe, pairing, start, on_boot = decide_toggle(cfg, held, bleterm.session(), running)
+        if on_boot is not None and on_boot != cfg["ble_on_boot"]:
+            try:
+                set_on_boot(on_boot)
+            except Exception as e:
+                print("_bleboot: config:", e)
+            cfg["ble_on_boot"] = on_boot
+            print("_bleboot: BLE mode %s" % ("on" if on_boot else "off"))
+    else:
+        safe, pairing, start = decide(cfg, held, bleterm.session(), running)
     bleterm._set_safe_mode(safe)
     bleterm.configure(name=cfg["name"], require_pairing=cfg["require_pairing"], led=cfg["led_status"])
     if start:
         bleterm.start()
         if pairing:
             bleterm.pairing(60)
+        elif toggle and cfg["require_pairing"] and not bleterm.keys():
+            bleterm.pairing(UNPAIRED_S)  # closes when the first computer pairs
     bleterm._boot_done()
-    _hook("status", cfg)
+    _hook("status", cfg, toggle and safe)
     if safe:
-        print("_bleboot: safe mode (boot.py/main.py skipped)%s" % (", pairing open" if pairing else ""))
+        print("_bleboot: %s (boot.py/main.py skipped)%s" % (
+            "BLE mode" if toggle else "safe mode", ", pairing open" if pairing else ""))
 
 
 if __name__ == "__main__":

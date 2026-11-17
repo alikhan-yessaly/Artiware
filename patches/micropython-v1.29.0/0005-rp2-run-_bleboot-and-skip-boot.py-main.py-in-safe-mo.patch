@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: alikhanyessaly <alikhan.yessaly@quantum.edu.kz>
 Date: Tue, 17 Nov 2026 08:31:14 +0500
-Subject: [PATCH 5/7] rp2: run _bleboot and skip boot.py/main.py in safe mode
+Subject: [PATCH 5/8] rp2: run _bleboot and skip boot.py/main.py in safe mode
 
 ---
  ports/rp2/main.c | 15 +++++++++++++++

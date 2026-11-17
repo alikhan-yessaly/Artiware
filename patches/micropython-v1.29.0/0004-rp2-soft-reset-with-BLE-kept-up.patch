@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: alikhanyessaly <alikhan.yessaly@quantum.edu.kz>
 Date: Tue, 17 Nov 2026 08:30:56 +0500
-Subject: [PATCH 4/7] rp2: soft reset with BLE kept up
+Subject: [PATCH 4/8] rp2: soft reset with BLE kept up
 
 Call bleterm_vm_ready() after mp_bluetooth_hci_init(), and initialise the
 static HCI soft timer only once (it may still be queued after a soft reset).

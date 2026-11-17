@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: alikhanyessaly <alikhan.yessaly@quantum.edu.kz>
 Date: Tue, 17 Nov 2026 08:30:56 +0500
-Subject: [PATCH 2/7] btstack: system services and stack kept up for bleterm
+Subject: [PATCH 2/8] btstack: system services and stack kept up for bleterm
 
 - ATT read/write callbacks dispatch the bleterm system block first and
   tolerate missing user state (NULL root pointers).

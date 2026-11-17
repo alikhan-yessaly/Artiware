@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: alikhanyessaly <alikhan.yessaly@quantum.edu.kz>
 Date: Tue, 17 Nov 2026 08:30:56 +0500
-Subject: [PATCH 1/7] rp2: bleterm stdio
+Subject: [PATCH 1/8] rp2: bleterm stdio
 
 Call bleterm_tx_strn() from mp_hal_stdout_tx_strn, report BLE writability
 in mp_hal_stdio_poll and release pending NUS writes when stdin is consumed.

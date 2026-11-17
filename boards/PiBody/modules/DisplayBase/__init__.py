@@ -10,6 +10,16 @@ BAUDRATE = 60_000_000
 WIDTH = 240
 HEIGHT = 320
 
+class _NoBar:
+    HEIGHT = 0
+    mode = "off"
+    height = 0
+    def show(self): pass
+    def dot(self): pass
+    def hide(self): pass
+    def retreat(self): pass
+
+
 class DisplayBase(st7789.ST7789):
     font_small = vga2_8x16
     font_medium = vga2_10x20
@@ -24,16 +34,17 @@ class DisplayBase(st7789.ST7789):
             cls._instance._initialized = False
         return cls._instance
 
-    # Set by the BLE status screen (_bleboard.py) while it shows on the display.
-    # The first DisplayBase() from user code calls it once: the status screen
-    # stops and clears, and the display belongs to the user from then on.
-    _on_claim = None
+    @property
+    def bar(self):
+        """BLE mode top bar: bar.show(), bar.dot(), bar.hide(), bar.retreat(),
+        bar.height (rows it covers), bar.mode. Does nothing in USB mode."""
+        try:
+            import _bleboard
+            return _bleboard.bar
+        except ImportError:
+            return _NoBar()
 
     def __init__(self):
-        cb = DisplayBase._on_claim
-        if cb is not None:
-            DisplayBase._on_claim = None
-            cb()
         if self._initialized:
             return
         self._initialized = True

@@ -629,6 +629,34 @@ static mp_obj_t bleterm_version(void) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_0(bleterm_version_obj, bleterm_version);
 
+// idle(): True while the board waits for input (REPL prompt or input()),
+// False while a program runs. Used for the running indicator.
+static mp_obj_t bleterm_idle(void) {
+    extern bool bleterm_stdin_waiting(void);
+    return mp_obj_new_bool(bleterm_stdin_waiting());
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(bleterm_idle_obj, bleterm_idle);
+
+// _bar_state(): status bits for the PiBody top bar, without allocating (it is
+// polled from a timer while user code runs). 0x01 started, 0x02 IDE link,
+// 0x04 IDE authenticated, 0x08 pairing open, 0x10 idle (waiting for input),
+// 0x20 safe mode; bits 8.. number of links.
+static mp_obj_t bleterm_bar_state(void) {
+    extern bool bleterm_stdin_waiting(void);
+    bleterm_state_t *g = &bleterm_g;
+    bleterm_link_t *link = ide_link();
+    mp_int_t v = 0;
+    v |= g->started ? 0x01 : 0;
+    v |= link ? 0x02 : 0;
+    v |= (link && link->auth) ? 0x04 : 0;
+    v |= g->pairing_until_ms != 0 ? 0x08 : 0;
+    v |= bleterm_stdin_waiting() ? 0x10 : 0;
+    v |= g->safe_mode ? 0x20 : 0;
+    v |= (mp_int_t)links_count() << 8;
+    return MP_OBJ_NEW_SMALL_INT(v);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(bleterm_bar_state_obj, bleterm_bar_state);
+
 extern const mp_obj_fun_builtin_fixed_t bleterm_keys_obj;
 extern const mp_obj_fun_builtin_fixed_t bleterm_add_key_obj;
 extern const mp_obj_fun_builtin_fixed_t bleterm_remove_key_obj;
@@ -643,6 +671,8 @@ static const mp_rom_map_elem_t bleterm_module_globals_table[] = {
     BLETERM_PBL_GLOBALS
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_bleterm) },
     { MP_ROM_QSTR(MP_QSTR_version), MP_ROM_PTR(&bleterm_version_obj) },
+    { MP_ROM_QSTR(MP_QSTR_idle), MP_ROM_PTR(&bleterm_idle_obj) },
+    { MP_ROM_QSTR(MP_QSTR__bar_state), MP_ROM_PTR(&bleterm_bar_state_obj) },
     { MP_ROM_QSTR(MP_QSTR_start), MP_ROM_PTR(&bleterm_start_obj) },
     { MP_ROM_QSTR(MP_QSTR_stop), MP_ROM_PTR(&bleterm_stop_obj) },
     { MP_ROM_QSTR(MP_QSTR_configure), MP_ROM_PTR(&bleterm_configure_obj) },

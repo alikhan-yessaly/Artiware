@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: alikhanyessaly <alikhan.yessaly@quantum.edu.kz>
+Date: Tue, 17 Nov 2026 14:31:33 +0500
+Subject: [PATCH 8/8] rp2: report stdin wait to bleterm (running indicator)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ ports/rp2/mphalport.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/ports/rp2/mphalport.c b/ports/rp2/mphalport.c
+index d56ec1906..3d8ad2ee3 100644
+--- a/ports/rp2/mphalport.c
++++ b/ports/rp2/mphalport.c
+@@ -111,7 +111,14 @@ int mp_hal_stdin_rx_chr(void) {
+             return dupterm_c;
+         }
+         #endif
++        #if MICROPY_PY_BLETERM
++        // Blocked waiting for input (REPL prompt or input()): bleterm.idle().
++        bleterm_stdin_wait(true);
+         mp_event_wait_indefinite();
++        bleterm_stdin_wait(false);
++        #else
++        mp_event_wait_indefinite();
++        #endif
+     }
+ }
+ 

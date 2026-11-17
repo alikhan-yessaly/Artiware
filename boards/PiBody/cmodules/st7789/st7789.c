@@ -172,6 +172,34 @@ static void write_spi(mp_obj_base_t *spi_obj, const uint8_t *buf, int len) {
     spi_p->transfer(spi_obj, len, buf, NULL);
 }
 
+// --- Overlay (PiBody BLE top bar) -------------------------------------------
+// Shared by every ST7789 object. Drawing into rows < overlay_top is dropped, so
+// the bar stays on top; drawing that touches the dot rectangle sets
+// overlay_dirty so its owner repaints it. The bar itself draws with
+// overlay_bypass set. With overlay_top 0 and no dot the driver is unchanged.
+static uint16_t overlay_top = 0;
+static int16_t dot_x0 = 0, dot_y0 = 0, dot_x1 = -1, dot_y1 = -1;  // dot_x1 < 0: no dot
+static bool overlay_bypass = false;
+static bool overlay_dirty = false;
+static uint32_t skip_bytes = 0;  // pixel bytes of the current window to drop
+#define SKIP_ALL UINT32_MAX
+
+static void write_data(st7789_ST7789_obj_t *self, const uint8_t *buf, int len) {
+    if (skip_bytes) {
+        if (skip_bytes == SKIP_ALL) {
+            return;
+        }
+        if ((uint32_t)len <= skip_bytes) {
+            skip_bytes -= len;
+            return;
+        }
+        buf += skip_bytes;
+        len -= skip_bytes;
+        skip_bytes = 0;
+    }
+    write_spi(self->spi_obj, buf, len);
+}
+
 static void st7789_ST7789_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
     (void)kind;
     st7789_ST7789_obj_t *self = MP_OBJ_TO_PTR(self_in);
@@ -192,11 +220,25 @@ static void write_cmd(st7789_ST7789_obj_t *self, uint8_t cmd, const uint8_t *dat
 }
 
 static void set_window(st7789_ST7789_obj_t *self, uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
+    skip_bytes = 0;
     if (x0 > x1 || x1 >= self->width) {
         return;
     }
     if (y0 > y1 || y1 >= self->height) {
         return;
+    }
+    if (!overlay_bypass) {
+        if (dot_x1 >= 0 && x0 <= dot_x1 && x1 >= dot_x0 && y0 <= dot_y1 && y1 >= dot_y0) {
+            overlay_dirty = true;
+        }
+        if (y0 < overlay_top) {
+            if (y1 < overlay_top) {
+                skip_bytes = SKIP_ALL;  // window entirely under the bar
+                return;
+            }
+            skip_bytes = (uint32_t)(overlay_top - y0) * (x1 - x0 + 1) * 2;
+            y0 = overlay_top;
+        }
     }
 
     if (self->bounding) {
@@ -233,7 +275,7 @@ static mp_obj_t st7789_ST7789_set_window(size_t n_args, const mp_obj_t *args) {
 
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(st7789_ST7789_set_window_obj, 5, 5, st7789_ST7789_set_window);
 
-static void fill_color_buffer(mp_obj_base_t *spi_obj, uint16_t color, int length) {
+static void fill_color_buffer(st7789_ST7789_obj_t *self, uint16_t color, int length) {
     const int buffer_pixel_size = 128;
     int chunks = length / buffer_pixel_size;
     int rest = length % buffer_pixel_size;
@@ -247,11 +289,11 @@ static void fill_color_buffer(mp_obj_base_t *spi_obj, uint16_t color, int length
     }
     if (chunks) {
         for (int j = 0; j < chunks; j++) {
-            write_spi(spi_obj, (uint8_t *)buffer, buffer_pixel_size * 2);
+            write_data(self, (uint8_t *)buffer, buffer_pixel_size * 2);
         }
     }
     if (rest) {
-        write_spi(spi_obj, (uint8_t *)buffer, rest * 2);
+        write_data(self, (uint8_t *)buffer, rest * 2);
     }
 }
 
@@ -275,8 +317,8 @@ void draw_pixel(st7789_ST7789_obj_t *self, int16_t x, int16_t y, uint16_t color)
         set_window(self, x, y, x, y);
         DC_HIGH();
         CS_LOW();
-        write_spi(self->spi_obj, &hi, 1);
-        write_spi(self->spi_obj, &lo, 1);
+        write_data(self, &hi, 1);
+        write_data(self, &lo, 1);
         CS_HIGH();
     }
 }
@@ -298,7 +340,7 @@ void fast_hline(st7789_ST7789_obj_t *self, int16_t x, int16_t y, int16_t w, uint
                 set_window(self, x, y, x2, y);
                 DC_HIGH();
                 CS_LOW();
-                fill_color_buffer(self->spi_obj, color, w);
+                fill_color_buffer(self, color, w);
                 CS_HIGH();
             }
         }
@@ -327,7 +369,7 @@ static void fast_vline(st7789_ST7789_obj_t *self, int16_t x, int16_t y, int16_t 
                 set_window(self, x, y, x, y2);
                 DC_HIGH();
                 CS_LOW();
-                fill_color_buffer(self->spi_obj, color, h);
+                fill_color_buffer(self, color, h);
                 CS_HIGH();
             }
         }
@@ -349,6 +391,7 @@ static mp_obj_t st7789_ST7789_hard_reset(mp_obj_t self_in) {
     RESET_HIGH();
     mp_hal_delay_ms(150);
     CS_HIGH();
+    overlay_dirty = true;  // the panel was cleared: the bar needs a repaint
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(st7789_ST7789_hard_reset_obj, st7789_ST7789_hard_reset);
@@ -358,6 +401,7 @@ static mp_obj_t st7789_ST7789_soft_reset(mp_obj_t self_in) {
 
     write_cmd(self, ST7789_SWRESET, NULL, 0);
     mp_hal_delay_ms(150);
+    overlay_dirty = true;
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(st7789_ST7789_soft_reset_obj, st7789_ST7789_soft_reset);
@@ -409,7 +453,7 @@ static mp_obj_t st7789_ST7789_fill_rect(size_t n_args, const mp_obj_t *args) {
         set_window(self, x, y, right, bottom);
         DC_HIGH();
         CS_LOW();
-        fill_color_buffer(self->spi_obj, color, w * h);
+        fill_color_buffer(self, color, w * h);
         CS_HIGH();
     }
     return mp_const_none;
@@ -423,7 +467,7 @@ static mp_obj_t st7789_ST7789_fill(mp_obj_t self_in, mp_obj_t _color) {
     set_window(self, 0, 0, self->width - 1, self->height - 1);
     DC_HIGH();
     CS_LOW();
-    fill_color_buffer(self->spi_obj, color, self->width * self->height);
+    fill_color_buffer(self, color, self->width * self->height);
     CS_HIGH();
 
     return mp_const_none;
@@ -437,7 +481,7 @@ static mp_obj_t st7789_ST7789_clear(mp_obj_t self_in) {
     set_window(self, 0, 0, self->width - 1, self->height - 1);
     DC_HIGH();
     CS_LOW();
-    fill_color_buffer(self->spi_obj, BLACK, self->width * self->height);
+    fill_color_buffer(self, BLACK, self->width * self->height);
     CS_HIGH();
 
     return mp_const_none;
@@ -562,10 +606,10 @@ static mp_obj_t st7789_ST7789_blit_buffer(size_t n_args, const mp_obj_t *args) {
     int rest = limit % buf_size;
     int i = 0;
     for (; i < chunks; i++) {
-        write_spi(self->spi_obj, (const uint8_t *)buf_info.buf + i * buf_size, buf_size);
+        write_data(self, (const uint8_t *)buf_info.buf + i * buf_size, buf_size);
     }
     if (rest) {
-        write_spi(self->spi_obj, (const uint8_t *)buf_info.buf + i * buf_size, rest);
+        write_data(self, (const uint8_t *)buf_info.buf + i * buf_size, rest);
     }
     CS_HIGH();
 
@@ -926,7 +970,7 @@ static mp_obj_t st7789_ST7789_write(size_t n_args, const mp_obj_t *args) {
                     set_window(self, x, y, x2, y2);
                     DC_HIGH();
                     CS_LOW();
-                    write_spi(self->spi_obj, (uint8_t *)self->i2c_buffer, data_size);
+                    write_data(self, (uint8_t *)self->i2c_buffer, data_size);
                     CS_HIGH();
                     print_width += width;
                 }
@@ -1007,7 +1051,7 @@ static mp_obj_t st7789_ST7789_bitmap(size_t n_args, const mp_obj_t *args) {
         set_window(self, x, y, x1, y + height - 1);
         DC_HIGH();
         CS_LOW();
-        write_spi(self->spi_obj, (uint8_t *)self->i2c_buffer, buf_size);
+        write_data(self, (uint8_t *)self->i2c_buffer, buf_size);
         CS_HIGH();
     }
 
@@ -1107,7 +1151,7 @@ static mp_obj_t st7789_ST7789_text(size_t n_args, const mp_obj_t *args) {
                 set_window(self, x0, y0, x1, y0 + height - 1);
                 DC_HIGH();
                 CS_LOW();
-                write_spi(self->spi_obj, (uint8_t *)self->i2c_buffer, buf_size);
+                write_data(self, (uint8_t *)self->i2c_buffer, buf_size);
                 CS_HIGH();
             }
             x0 += width;
@@ -1648,7 +1692,7 @@ static int out_slow(                                    // 1:Ok, 0:Aborted
 
     DC_HIGH();
     CS_LOW();
-    write_spi(self->spi_obj, (uint8_t *)dev->fbuf, wx2 * h);
+    write_data(self, (uint8_t *)dev->fbuf, wx2 * h);
     CS_HIGH();
 
     return 1;     // Continue to decompress
@@ -1733,7 +1777,7 @@ static mp_obj_t st7789_ST7789_jpg(size_t n_args, const mp_obj_t *args) {
                     set_window(self, x, y, x + jdec.width - 1, y + jdec.height - 1);
                     DC_HIGH();
                     CS_LOW();
-                    write_spi(self->spi_obj, (uint8_t *)self->i2c_buffer, bufsize);
+                    write_data(self, (uint8_t *)self->i2c_buffer, bufsize);
                     CS_HIGH();
                 }
             } else {
@@ -1914,7 +1958,7 @@ void png_flush(st7789_ST7789_obj_t *self, PNG_USER_DATA *user_data) {
         set_window(self, user_data->first, user_data->row, user_data->last, user_data->row);
         DC_HIGH();
         CS_LOW();
-        write_spi(self->spi_obj, (uint8_t *)self->i2c_buffer, user_data->pixels * 2);
+        write_data(self, (uint8_t *)self->i2c_buffer, user_data->pixels * 2);
         CS_HIGH();
         // reset buffer pointer and pixel count
         user_data->buffer = self->i2c_buffer;
@@ -2571,11 +2615,49 @@ mp_obj_t st7789_ST7789_make_new(const mp_obj_type_t *type,
     return MP_OBJ_FROM_PTR(self);
 }
 
+// _overlay(top, dot=None): reserve `top` rows (0 = none) and/or watch the dot
+// rectangle (x, y, w, h). Returns None.
+static mp_obj_t st7789_overlay(size_t n_args, const mp_obj_t *args) {
+    mp_int_t top = mp_obj_get_int(args[0]);
+    overlay_top = top < 0 ? 0 : (uint16_t)top;
+    dot_x0 = dot_y0 = 0;
+    dot_x1 = dot_y1 = -1;
+    if (n_args > 1 && args[1] != mp_const_none) {
+        mp_obj_t *r;
+        mp_obj_get_array_fixed_n(args[1], 4, &r);
+        dot_x0 = mp_obj_get_int(r[0]);
+        dot_y0 = mp_obj_get_int(r[1]);
+        dot_x1 = dot_x0 + mp_obj_get_int(r[2]) - 1;
+        dot_y1 = dot_y0 + mp_obj_get_int(r[3]) - 1;
+    }
+    overlay_dirty = false;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(st7789_overlay_obj, 1, 2, st7789_overlay);
+
+// _overlay_bypass(flag): the bar draws with the clip off.
+static mp_obj_t st7789_overlay_bypass(mp_obj_t flag) {
+    overlay_bypass = mp_obj_is_true(flag);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(st7789_overlay_bypass_obj, st7789_overlay_bypass);
+
+// _overlay_dirty(): True once after the dot was drawn over or the panel was reset.
+static mp_obj_t st7789_overlay_dirty(void) {
+    bool d = overlay_dirty;
+    overlay_dirty = false;
+    return mp_obj_new_bool(d);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(st7789_overlay_dirty_obj, st7789_overlay_dirty);
+
 static const mp_map_elem_t st7789_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR___name__), MP_OBJ_NEW_QSTR(MP_QSTR_st7789)},
     {MP_ROM_QSTR(MP_QSTR_color), (mp_obj_t)&st7789_color565_obj},
     {MP_ROM_QSTR(MP_QSTR_map_bitarray_to_rgb565), (mp_obj_t)&st7789_map_bitarray_to_rgb565_obj},
     {MP_ROM_QSTR(MP_QSTR_ST7789), (mp_obj_t)&st7789_ST7789_type},
+    {MP_ROM_QSTR(MP_QSTR__overlay), (mp_obj_t)&st7789_overlay_obj},
+    {MP_ROM_QSTR(MP_QSTR__overlay_bypass), (mp_obj_t)&st7789_overlay_bypass_obj},
+    {MP_ROM_QSTR(MP_QSTR__overlay_dirty), (mp_obj_t)&st7789_overlay_dirty_obj},
     {MP_ROM_QSTR(MP_QSTR_BLACK), MP_ROM_INT(BLACK)},
     {MP_ROM_QSTR(MP_QSTR_BLUE), MP_ROM_INT(BLUE)},
     {MP_ROM_QSTR(MP_QSTR_RED), MP_ROM_INT(RED)},

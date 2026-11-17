@@ -23,6 +23,8 @@ uintptr_t bleterm_stdio_poll(uintptr_t poll_flags);
 // Called after a byte was taken from stdin_ringbuf: releases a pending
 // NUS write once there is room for it.
 void bleterm_stdin_consumed(void);
+// mp_hal_stdin_rx_chr is blocked waiting for input (REPL prompt or input()).
+void bleterm_stdin_wait(bool waiting);
 // Copy stdout bytes to the BLE TX ring (discarded without a subscribed,
 // unlocked IDE link). Never fails.
 void bleterm_tx_strn(const char *str, size_t len);

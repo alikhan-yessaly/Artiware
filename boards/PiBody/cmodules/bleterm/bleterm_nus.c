@@ -174,6 +174,16 @@ void bleterm_stdin_inject(const uint8_t *data, size_t len) {
     }
 }
 
+static volatile bool stdin_waiting;
+
+void bleterm_stdin_wait(bool waiting) {
+    stdin_waiting = waiting;
+}
+
+bool bleterm_stdin_waiting(void) {
+    return stdin_waiting;
+}
+
 void bleterm_stdin_consumed(void) {
     if (bleterm_g.rx_pending && ringbuf_free(&stdin_ringbuf) >= bleterm_g.rx_pending_len) {
         bleterm_schedule_worker();
