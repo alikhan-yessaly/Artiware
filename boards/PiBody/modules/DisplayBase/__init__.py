@@ -63,6 +63,21 @@ class DisplayBase(st7789.ST7789):
         self.height = HEIGHT
 
     
+    def smooth_text(self, text, x, y, font=None, fg=st7789.WHITE, bg=st7789.BLACK):
+        """Anti-aliased proportional text (Roboto). font: DisplayBase.sans13,
+        sans13b, sans17b (default) or sans24b. Returns the x after the text."""
+        from . import smoothtext
+        if font is None:
+            from . import sans17b as font
+        return smoothtext.draw(self, text, x, y, font, fg, bg, self.width)
+
+    def smooth_width(self, text, font=None):
+        """Width in pixels of smooth_text(text, font=font)."""
+        from . import smoothtext
+        if font is None:
+            from . import sans17b as font
+        return smoothtext.width(text, font)
+
     def text(self, text, x, y, font=font_small, fg=st7789.WHITE, bg=st7789.BLACK):
         super().text(font, text, x, y, fg, bg)
 

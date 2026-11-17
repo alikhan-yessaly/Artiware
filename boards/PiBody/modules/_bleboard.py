@@ -65,7 +65,10 @@ def _panel():
         import DisplayBase as db
         from machine import Pin, SPI
         import st7789
-        _fonts = db.DisplayBase
+        from DisplayBase import sans13, sans13b, sans17b, sans24b
+
+        class _fonts:  # smooth Roboto fonts (DisplayBase.smoothtext)
+            small, small_bold, medium, large = sans13, sans13b, sans17b, sans24b
         _d = st7789.ST7789(
             SPI(1, baudrate=db.BAUDRATE, sck=Pin("DISPLAY_SCK"), mosi=Pin("DISPLAY_MOSI")),
             W, H,
@@ -83,11 +86,28 @@ def _bypass(on):
 
 
 def _text(s, x, y, font, fg, bg):
-    _d.text(font, s, x, y, fg, bg)
+    from DisplayBase import smoothtext
+    return smoothtext.draw(_d, s, x, y, font, fg, bg)
+
+
+def _width(s, font):
+    from DisplayBase import smoothtext
+    return smoothtext.width(s, font)
 
 
 def _center(s, y, font, fg, bg):
-    _text(s, max(0, (W - len(s) * font.WIDTH) // 2), y, font, fg, bg)
+    _text(s, max(0, (W - _width(s, font)) // 2), y, font, fg, bg)
+
+
+def _chip(s, y, dot, tint):
+    """Rounded chip, centred: coloured dot and dark text on a pale tint."""
+    f = _fonts.medium
+    r = 14
+    w = _width(s, f) + 2 * r + 16
+    x = (W - w) // 2
+    _pill(x, y, w, r, tint)
+    _d.fill_circle(x + r + 2, y + r, 4, dot)
+    _text(s, x + r + 13, y + r - f.HEIGHT // 2 + 1, f, INK, tint)
 
 
 def _poly(cx, cy, r, n, bump, color, angle_offset=None):
@@ -173,7 +193,7 @@ def _paint_running(v):
 
 def _paint_bar(v):
     _d.fill_rect(0, 0, W, BAR_H - 1, WHITE)
-    _text(_name[:22], 40, 0, _fonts.font_small, INK, WHITE)
+    _text(_name[:24], 40, 0, _fonts.small_bold, INK, WHITE)
     _d.hline(0, BAR_H - 1, W, INK)
     _paint_icon(v)
     _paint_link(v)
@@ -203,21 +223,15 @@ def _paint_logo(v):
     _d.fill(WHITE)
     _poly(120, LOGO_Y, 68, 8, 0.7, BLACK)
     _poly(120, LOGO_Y, 48, 4, 0.3, WHITE, angle_offset=0)
-    _center(_name[:20], NAME_Y, _fonts.font_large, INK, WHITE)
+    _center(_name[:20], NAME_Y, _fonts.large, INK, WHITE)
     _paint_logo_status(v)
 
 
 def _paint_logo_status(v):
     s, dot, tint, hint = _status(v)
-    f = _fonts.font_medium
     _d.fill_rect(0, CHIP_Y, W, H - CHIP_Y, WHITE)
-    r = 14
-    w = len(s) * f.WIDTH + 2 * r + 18
-    x = (W - w) // 2
-    _pill(x, CHIP_Y, w, r, tint)
-    _d.fill_circle(x + r + 3, CHIP_Y + r, 4, dot)
-    _text(s, x + r + 14, CHIP_Y + r - f.HEIGHT // 2 + 1, f, INK, tint)
-    _center(hint, HINT_Y, _fonts.font_small, MUTED, WHITE)
+    _chip(s, CHIP_Y, dot, tint)
+    _center(hint, HINT_Y, _fonts.small, MUTED, WHITE)
 
 
 def _clear_bar_area():
@@ -382,22 +396,16 @@ def feedback(stage):
             on = json.loads(open("/ble_config.json").read()).get("ble_on_boot", False)
         except Exception:
             on = False
-        _center("Release now for", 178, f.font_small, MUTED, WHITE)
+        _center("Release now for", 178, f.small, MUTED, WHITE)
         s, dot, tint = ("Bluetooth OFF", RED, AMBER_TINT) if on else ("Bluetooth ON", BLUE, BLUE_TINT)
         hint = "Back to USB only" if on else "Code over Bluetooth"
     else:
-        _center("Release now for", 178, f.font_small, MUTED, WHITE)
+        _center("Release now for", 178, f.small, MUTED, WHITE)
         s, dot, tint, hint = "Pairing", AMBER, AMBER_TINT, "Open for 60 seconds"
-    r = 14
-    fm = f.font_medium
-    w = len(s) * fm.WIDTH + 2 * r + 18
-    x = (W - w) // 2
-    _pill(x, 204, w, r, tint)
-    _d.fill_circle(x + r + 3, 204 + r, 4, dot)
-    _text(s, x + r + 14, 204 + r - fm.HEIGHT // 2 + 1, fm, INK, tint)
-    _center(hint, 250, f.font_small, MUTED, WHITE)
+    _chip(s, 204, dot, tint)
+    _center(hint, 250, f.small, MUTED, WHITE)
     if stage == "safe":
-        _center("Keep holding 5 s: pairing", 290, f.font_small, MUTED, WHITE)
+        _center("Keep holding 5 s: pairing", 290, f.small, MUTED, WHITE)
 
 
 def status(cfg, entered=False):

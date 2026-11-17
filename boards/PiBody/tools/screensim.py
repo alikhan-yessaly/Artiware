@@ -165,6 +165,11 @@ def _make_st7789():
                     for px in range(nodes[k], nodes[k + 1] + 1):
                         put(px + x, py + y, c)
 
+        def blit_buffer(self, buf, x, y, w, h):
+            buf = bytes(buf)
+            for i in range(min(len(buf) // 2, w * h)):
+                put(x + i % w, y + i // w, buf[2 * i] << 8 | buf[2 * i + 1])
+
         def text(self, font, s, x0, y0, fg=0xFFFF, bg=0x0000):
             w, h = font.WIDTH, font.HEIGHT
             data = font.FONT if hasattr(font, "FONT") else font._FONT
@@ -205,6 +210,34 @@ def _make_st7789():
     m._overlay = _overlay
     m._overlay_bypass = _overlay_bypass
     m._overlay_dirty = _overlay_dirty
+    return m
+
+
+def _make_micropython():
+    """viper on the host: ptr16 arguments become 16-bit views."""
+    import builtins
+    m = types.ModuleType("micropython")
+
+    class ptr8: pass
+    class ptr16: pass
+    class ptr32: pass
+    builtins.ptr8, builtins.ptr16, builtins.ptr32 = ptr8, ptr16, ptr32
+
+    def viper(f):
+        import inspect
+        names = list(inspect.signature(f).parameters)
+        wide = [i for i, n in enumerate(names) if f.__annotations__.get(n) is ptr16]
+
+        def run(*a):
+            a = list(a)
+            for i in wide:
+                a[i] = memoryview(a[i]).cast("B").cast("H")
+            return f(*a)
+        return run
+
+    m.viper = viper
+    m.native = lambda f: f
+    m.const = lambda x: x
     return m
 
 
@@ -283,6 +316,7 @@ class Board:
                 del sys.modules[k]
         self.st = sys.modules["st7789"] = _make_st7789()
         self.machine = sys.modules["machine"] = _make_machine()
+        sys.modules["micropython"] = _make_micropython()
         self.bt = sys.modules["bleterm"] = _make_bleterm()
         for p in (MODULES, libs):
             if p and p not in sys.path:
@@ -365,6 +399,22 @@ def scenarios(libs):
         d.text("Hello", 10, 4, d.font_bold, d.WHITE, d.BLACK)
         bd.tick()
         out.append(("bar.dot()", bd.frame()))
+    # smooth_text for students, all four fonts, Latin and Cyrillic
+    if libs:
+        bd = Board(libs)
+        d = bd.display()
+        from DisplayBase import sans24b, sans17b, sans13b, sans13
+        d.fill(d.BLACK)
+        y = 10
+        for f in (sans24b, sans17b, sans13b, sans13):
+            d.smooth_text(f.NAME, 8, y, f, d.WHITE, d.BLACK)
+            y += f.HEIGHT + 4
+            d.smooth_text("Сәлем, PiBody! Қазақша", 8, y, f, d.YELLOW, d.BLACK)
+            y += f.HEIGHT + 10
+        d.fill_rect(0, y, 240, 40, 0x18E4)
+        d.smooth_text("Score: 1280", 8, y + 6, sans24b, d.CYAN, 0x18E4)
+        out.append(("smooth_text", bd.frame()))
+
     # button-hold feedback screens
     import io
     for on in (False, True):

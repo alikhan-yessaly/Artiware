@@ -56,6 +56,10 @@ make                   # build/PiBody/firmware.uf2
   `display.bar.show()`, `.dot()` (one status dot in the corner), `.hide()`,
   `.retreat()` (hidden until the program ends), `.height`, `.mode`.
   `"display_status": false` in `/ble_config.json` turns screen and bar off.
+- Smooth text: `display.smooth_text("Сәлем!", x, y, font, fg, bg)` and
+  `display.smooth_width(text, font)` draw anti-aliased Roboto (fonts
+  `DisplayBase.sans13`, `sans13b`, `sans17b`, `sans24b`; ASCII, Russian and
+  Kazakh letters). About 15-25 ms per line; the bar and logo screen use them.
 - IDE Stop (or Ctrl-C) ends a program; Ctrl-D soft reset keeps the BLE link.
 - `pibody.ble` (pibody_libs) gives student code links between boards:
   `advertise`, `scan`, `connect`, `send`, `receive`, `on_receive`.
@@ -64,4 +68,10 @@ make                   # build/PiBody/firmware.uf2
 - `cmodules/bleterm/`: BLE terminal C module (copy of picow-ble-ide `firmware/modules/bleterm`)
 - `modules/_bleboot.py`: boot control (copy of picow-ble-ide); `modules/_bleboard.py`: PiBody defaults, BLE mode toggle, logo screen and top bar
 - `modules/DisplayBase/__init__.py`: `display.bar`
+- `modules/DisplayBase/smoothtext.py` + `sans*.py`: smooth text renderer and fonts.
+  Regenerate fonts with `tools/makefont.swift` (macOS, CoreText) from Roboto TTFs
+  (Apache-2.0, fonts.google.com/specimen/Roboto), e.g.
+  `swift tools/makefont.swift Roboto-Bold.ttf 17 modules/DisplayBase/sans17b.py "Roboto Bold 17"`
+- `tools/screensim.py`: renders the BLE screens, the bar and pibody Display
+  code to PNGs on the host (fake st7789), so the look can be checked without a board
 - `cmodules/st7789/st7789.c`: overlay clip (`_overlay`, `_overlay_bypass`, `_overlay_dirty`) keeping the bar on top
