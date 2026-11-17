@@ -15,7 +15,8 @@ DEFAULTS = {
 
 POLL_MS = 500
 
-_d = None          # DisplayBase while the status screen owns it
+_d = None          # own st7789.ST7789 while the status screen shows
+_db = None         # the DisplayBase package (fonts, size, pins)
 _timer = None
 _last = None
 _released = False  # user code took the display: never draw again until reset
@@ -27,36 +28,54 @@ def _grey():
 
 
 def _display():
-    """The display for the status screen, or None once user code owns it."""
-    global _d
+    """The display for the status screen, or None once user code owns it.
+
+    A separate st7789.ST7789 on the same pins, never the DisplayBase singleton:
+    creating that here would hand user code a plain DisplayBase for its
+    Display(DisplayBase) subclass."""
+    global _d, _db
     if _released:
         return None
     if _d is None:
-        from DisplayBase import DisplayBase
-        if DisplayBase._instance is not None:  # user code created it first
+        import DisplayBase as db
+        from machine import Pin, SPI
+        import st7789
+        if db.DisplayBase._instance is not None:  # user code has it already
             _release()
             return None
-        _d = DisplayBase()
-        DisplayBase._on_claim = _release
-        _d.fill(0)
+        d = st7789.ST7789(
+            SPI(1, baudrate=db.BAUDRATE, sck=Pin("DISPLAY_SCK"), mosi=Pin("DISPLAY_MOSI")),
+            db.WIDTH, db.HEIGHT,
+            reset=Pin("DISPLAY_RESET", Pin.OUT),
+            dc=Pin("DISPLAY_DC", Pin.OUT),
+            cs=Pin("DISPLAY_CS", Pin.OUT),
+            rotation=2, options=0, buffer_size=db.DISPLAY_BUF_SIZE)
+        d.init()
+        d.fill(0)
+        _d, _db = d, db
+        db.DisplayBase._on_claim = _release
         _header()
     return _d
+
+
+def _text(s, x, y, font, color):
+    _d.text(font, s, x, y, color, 0)
 
 
 def _header():
     import os
     import st7789
-    d = _d
-    d.text("BLE REPL", 8, 8, d.font_bold, st7789.CYAN)
+    f = _db.DisplayBase
+    _text("BLE REPL", 8, 8, f.font_bold, st7789.CYAN)
     v = os.uname().version.split(" on ", 1)
-    d.text(v[0][:29], 8, 48, d.font_small, _grey())
+    _text(v[0][:29], 8, 48, f.font_small, _grey())
     if len(v) > 1:
-        d.text(v[1][:29], 8, 66, d.font_small, _grey())
+        _text(v[1][:29], 8, 66, f.font_small, _grey())
 
 
 def _release():
     """User code wants the display: stop drawing and hand it over blank."""
-    global _d, _released
+    global _d, _db, _released
     _released = True
     stop()
     if _d is not None:
@@ -64,7 +83,7 @@ def _release():
             _d.fill(0)
         except Exception:
             pass
-    _d = None
+    _d = _db = None
 
 
 def _lines(s):
@@ -94,21 +113,24 @@ def _draw(s):
     d = _display()
     if d is None:
         return
-    fonts = {"small": d.font_small, "medium": d.font_medium, "large": d.font_large}
-    d.fill_rect(0, 92, d.width, d.height - 92, 0)
+    b = _db.DisplayBase
+    fonts = {"small": b.font_small, "medium": b.font_medium, "large": b.font_large}
+    d.fill_rect(0, 92, _db.WIDTH, _db.HEIGHT - 92, 0)
     import st7789
     y = 96
     if s.get("name"):
-        d.text(s["name"][:23], 8, y, d.font_medium, st7789.WHITE)
+        _text(s["name"][:23], 8, y, b.font_medium, st7789.WHITE)
     y += 32
     for text, color, font in _lines(s):
         f = fonts[font]
-        d.text(text[:29], 8, y, f, color)
+        _text(text[:29], 8, y, f, color)
         y += f.HEIGHT + 8
 
 
 def _tick(_t=None):
     global _last
+    if _released:  # a tick scheduled before the hand-off
+        return
     try:
         import bleterm
         s = bleterm.status()
@@ -150,12 +172,13 @@ def feedback(stage):
     d = _display()
     if d is None:
         return
-    d.fill_rect(0, 92, d.width, d.height - 92, 0)
+    b = _db.DisplayBase
+    d.fill_rect(0, 92, _db.WIDTH, _db.HEIGHT - 92, 0)
     if stage == "safe":
-        d.text("Safe mode", 8, 128, d.font_large, st7789.RED)
-        d.text("Keep holding: pairing", 8, 160, d.font_small, st7789.WHITE)
+        _text("Safe mode", 8, 128, b.font_large, st7789.RED)
+        _text("Keep holding: pairing", 8, 160, b.font_small, st7789.WHITE)
     else:
-        d.text("Pairing mode", 8, 128, d.font_large, st7789.MAGENTA)
+        _text("Pairing mode", 8, 128, b.font_large, st7789.MAGENTA)
 
 
 def status(cfg):
