@@ -63,8 +63,22 @@ make                   # build/PiBody/firmware.uf2
   (Russian etc.) and Kazakh (Ә Ғ Қ Ң Ө Ұ Ү Һ І), Tajik, Tatar and Bashkir.
   `display.text(text, x, y, font, fg, bg)` returns the x after the text;
   `display.text_width(text, font)` measures it. The st7789 driver draws them in
-  C (5-11 ms per full line). `vga2_8x16` etc. remain as names for these fonts;
+  C (about 2 ms per 30-letter line). `vga2_8x16` etc. remain as names for these fonts;
   CP437 symbols (codes 0-31) and rare Cyrillic letters (U+0460 up) are gone.
+- Display speed: SPI runs at 62.5 MHz (was 24 MHz). `st7789.spi_clock()` sets
+  the peripheral clock to the system clock; `DisplayBase.display_spi()` builds
+  the SPI with `min(62.5 MHz, clock/2)`. Calling `machine.freq()` later resets
+  the peripheral clock to 48 MHz, so SPI then runs at 24 MHz (slower, still
+  correct). Fills, blits and text go out by DMA in one transfer per call, and
+  text and `fill_shapes` compute the next band while DMA sends the last one.
+  Full-screen fill 21.7 ms (was 61.7), 120x120 blit 3.9 ms (was 10.6), logo
+  32.6 ms (was 106). Single pixels and short lines cost about 35-45 us each,
+  mostly MicroPython call overhead, so draw many small parts in a canvas.
+- `display.canvas(w, h)`: an off-screen RGB565 `framebuf.FrameBuffer` (w*h*2
+  bytes of RAM). Draw into it with the framebuf methods (`fill`, `rect`,
+  `line`, `text`, ...), then `canvas.show(x, y)` sends it in one transfer
+  (120x120: 3.6 ms). `display.blit_framebuf(buf, x, y, w, h)` sends any
+  little-endian RGB565 buffer the same way.
 - IDE Stop (or Ctrl-C) ends a program; Ctrl-D soft reset keeps the BLE link.
 - `pibody.ble` (pibody_libs) gives student code links between boards:
   `advertise`, `scan`, `connect`, `send`, `receive`, `on_receive`.
@@ -81,4 +95,6 @@ make                   # build/PiBody/firmware.uf2
   (h20 sans20, h24 sans24; Roboto-Bold.ttf h32 sans32b)
 - `tools/screensim.py`: renders the BLE screens, the bar and pibody Display
   code to PNGs on the host (fake st7789), so the look can be checked without a board
-- `cmodules/st7789/st7789.c`: overlay clip (`_overlay`, `_overlay_bypass`, `_overlay_dirty`) keeping the bar on top
+- `cmodules/st7789/st7789.c`: DMA SPI layer (`spi_start`/`spi_wait`, hot
+  functions in RAM), `fill_shapes` (fixed-point edge list, 4x4 anti-aliasing),
+  `blit_framebuf`, `spi_clock()`; overlay clip (`_overlay`, `_overlay_bypass`, `_overlay_dirty`) keeping the bar on top

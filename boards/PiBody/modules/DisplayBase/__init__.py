@@ -5,7 +5,17 @@ import st7789
 from . import sans16, sans20, sans24, sans32b
 
 DISPLAY_BUF_SIZE = 80 * 80 * 2
-BAUDRATE = 60_000_000
+BAUDRATE = 62_500_000  # the panel's limit; SPI gets the nearest rate below
+
+
+def display_spi():
+    """SPI bus of the display, as fast as the clocks allow (62.5 MHz at the
+    default 125 MHz: st7789.spi_clock() lifts the 24 MHz peripheral-clock limit)."""
+    try:
+        f = st7789.spi_clock()
+    except AttributeError:  # older driver
+        f = 48_000_000
+    return SPI(1, baudrate=min(BAUDRATE, f // 2), sck=Pin("DISPLAY_SCK"), mosi=Pin("DISPLAY_MOSI"))
 WIDTH = 240
 HEIGHT = 320
 
@@ -33,6 +43,23 @@ def artisan_logo(dev, cx, cy, r, fg=0x0000, bg=0xFFFF):
     dev.fill_shapes(round(cx - r) - 2, round(cy - r) - 2, round(2 * r) + 5, round(2 * r) + 5, bg, (
         (star_points(cx, cy, r, 8, 0.7), fg),
         (star_points(cx, cy, r * 0.7, 4, 0.3, 0), bg)))
+
+
+import framebuf
+
+
+class Canvas(framebuf.FrameBuffer):
+    """display.canvas(w, h): framebuf drawing (fill, pixel, line, rect,
+    ellipse, poly, text 8x8, blit, scroll) with the display's colours, shown
+    with show(x, y)."""
+
+    def __init__(self, display, w, h):
+        self.buffer = bytearray(w * h * 2)
+        super().__init__(self.buffer, w, h, framebuf.RGB565)
+        self.display, self.width, self.height = display, w, h
+
+    def show(self, x, y):
+        self.display.blit_framebuf(self.buffer, x, y, self.width, self.height)
 
 
 class _NoBar:
@@ -75,7 +102,7 @@ class DisplayBase(st7789.ST7789):
             return
         self._initialized = True
         super().__init__(
-            SPI(1, baudrate=BAUDRATE, sck=Pin("DISPLAY_SCK"), mosi=Pin("DISPLAY_MOSI")),
+            display_spi(),
             WIDTH, HEIGHT,
             reset=Pin("DISPLAY_RESET", Pin.OUT),
             dc=Pin("DISPLAY_DC", Pin.OUT),
@@ -103,6 +130,12 @@ class DisplayBase(st7789.ST7789):
             i = chars.find(ch)
             w += adv[i if i >= 0 else q]
         return w
+
+    def canvas(self, w, h):
+        """Off-screen RGB565 drawing area (a framebuf.FrameBuffer) for smooth,
+        flicker-free animation: draw on it, then canvas.show(x, y) sends it in
+        one go. Costs w*h*2 bytes of RAM (120x120: 28.8 KB)."""
+        return Canvas(self, w, h)
 
     # names from the first smooth-text version
     def smooth_text(self, text, x, y, font=font_medium, fg=st7789.WHITE, bg=st7789.BLACK):

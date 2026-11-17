@@ -248,6 +248,11 @@ def _make_st7789():
                 for q, c in enumerate(row):
                     put(bx0 + q, by0 + r, c)
 
+        def blit_framebuf(self, buf, x, y, w, h):
+            buf = bytes(buf)
+            for i in range(min(len(buf) // 2, w * h)):
+                put(x + i % w, y + i // w, buf[2 * i] | buf[2 * i + 1] << 8)
+
         def clear(self):
             self.fill(0)
 
@@ -298,6 +303,8 @@ def _make_st7789():
     for k in ("BLACK", "BLUE", "RED", "GREEN", "CYAN", "MAGENTA", "YELLOW", "WHITE"):
         setattr(m, k, getattr(ST7789, k))
 
+    m.spi_clock = lambda: 125_000_000
+
     def _overlay(top, dot=None):
         clip.top = top
         clip.dot = tuple(dot) if dot else None
@@ -314,6 +321,42 @@ def _make_st7789():
     m._overlay = _overlay
     m._overlay_bypass = _overlay_bypass
     m._overlay_dirty = _overlay_dirty
+    return m
+
+
+def _make_framebuf():
+    """Enough of framebuf for DisplayBase.Canvas: RGB565 fill, pixel, fill_rect."""
+    m = types.ModuleType("framebuf")
+    m.RGB565 = 1
+
+    class FrameBuffer:
+        def __init__(self, buf, w, h, fmt):
+            self._b, self._w, self._h = buf, w, h
+
+        def pixel(self, x, y, c=None):
+            if 0 <= x < self._w and 0 <= y < self._h:
+                i = 2 * (y * self._w + x)
+                if c is None:
+                    return self._b[i] | self._b[i + 1] << 8
+                self._b[i], self._b[i + 1] = c & 0xFF, c >> 8 & 0xFF
+
+        def fill_rect(self, x, y, w, h, c):
+            for yy in range(y, y + h):
+                for xx in range(x, x + w):
+                    self.pixel(xx, yy, c)
+
+        def fill(self, c):
+            self.fill_rect(0, 0, self._w, self._h, c)
+
+        def rect(self, x, y, w, h, c, f=False):
+            if f:
+                return self.fill_rect(x, y, w, h, c)
+            self.fill_rect(x, y, w, 1, c)
+            self.fill_rect(x, y + h - 1, w, 1, c)
+            self.fill_rect(x, y, 1, h, c)
+            self.fill_rect(x + w - 1, y, 1, h, c)
+
+    m.FrameBuffer = FrameBuffer
     return m
 
 
@@ -421,6 +464,7 @@ class Board:
         self.st = sys.modules["st7789"] = _make_st7789()
         self.machine = sys.modules["machine"] = _make_machine()
         sys.modules["micropython"] = _make_micropython()
+        sys.modules["framebuf"] = _make_framebuf()
         self.bt = sys.modules["bleterm"] = _make_bleterm()
         for p in (MODULES, libs):
             if p and p not in sys.path:
@@ -523,6 +567,17 @@ def scenarios(libs):
         for k in range(6):
             d.print("line", k, "temperature 23.5 C, влажность 40%")
         out.append(("display.print", bd.frame()))
+        # canvas: off-screen drawing shown in one go
+        bd = Board(libs)
+        d = bd.display()
+        d.fill(d.BLACK)
+        c = d.canvas(120, 80)
+        c.fill(0x18E4)
+        c.rect(4, 4, 112, 72, d.YELLOW)
+        c.fill_rect(20, 20, 40, 40, d.RED)
+        c.fill_rect(60, 30, 40, 30, d.CYAN)
+        c.show(60, 120)
+        out.append(("canvas", bd.frame()))
 
     # button-hold feedback screens
     import io

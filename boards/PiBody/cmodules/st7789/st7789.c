@@ -50,6 +50,10 @@
 
 #include "mpfile.h"
 #include "st7789.h"
+#include "hardware/spi.h"
+#include "hardware/dma.h"
+#include "hardware/clocks.h"
+#include "pico/platform.h"
 #include "jpg/tjpgd565.h"
 #include "png/pngle.h"
 
@@ -71,8 +75,11 @@
   #endif
 #endif
 
+static void spi_wait(void);
+
 #define CS_LOW()                       \
 {                                      \
+    spi_wait();                        \
     if (self->cs != GPIO_NUM_NC) {     \
         mp_hal_pin_write(self->cs, 0); \
     }                                  \
@@ -80,13 +87,14 @@
 
 #define CS_HIGH()                      \
 {                                      \
+    spi_wait();                        \
     if (self->cs != GPIO_NUM_NC) {     \
         mp_hal_pin_write(self->cs, 1); \
     }                                  \
 }
 
-#define DC_LOW() (mp_hal_pin_write(self->dc, 0))
-#define DC_HIGH() (mp_hal_pin_write(self->dc, 1))
+#define DC_LOW() {spi_wait(); mp_hal_pin_write(self->dc, 0);}
+#define DC_HIGH() {spi_wait(); mp_hal_pin_write(self->dc, 1);}
 
 #define RESET_LOW()                         \
 {                                           \
@@ -163,7 +171,104 @@ static uint16_t color565(uint8_t r, uint8_t g, uint8_t b) {
     return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | ((b & 0xF8) >> 3);
 }
 
-static void write_spi(mp_obj_base_t *spi_obj, const uint8_t *buf, int len) {
+// --- Fast SPI (rp2 hardware SPI + DMA) -----------------------------------
+// With a machine.SPI hardware object the driver writes to the SPI block
+// directly: small writes from the CPU, larger ones by DMA, single-colour fills
+// as one 16-bit DMA transfer from one value (no buffer), RGB565 buffers in
+// native byte order as 16-bit frames. At most one DMA transfer is in flight
+// (write_data_async); spi_wait() ends it, drains the RX FIFO and puts the SPI
+// back to 8-bit frames. Every CS/DC change and command waits first, so no
+// transaction ends early. Other objects (SoftSPI) use the SPI protocol.
+
+typedef struct {
+    mp_obj_base_t base;
+    spi_inst_t *const spi_inst;  // first field of the rp2 machine_spi_obj_t
+} spi_prefix_t;
+
+static spi_inst_t *pending_spi = NULL;
+static int pending_ch = -1;
+static uint16_t fill_value;  // source of fills (read by DMA until spi_wait)
+
+static spi_inst_t *hw_spi(mp_obj_base_t *spi_obj) {
+    if (spi_obj->type != &machine_spi_type) {
+        return NULL;
+    }
+    spi_inst_t *p = ((spi_prefix_t *)spi_obj)->spi_inst;
+    return (p == spi0 || p == spi1) ? p : NULL;
+}
+
+static void __not_in_flash_func(spi_frame_bits)(spi_inst_t *spi, int bits) {
+    while (spi_is_busy(spi)) {
+    }
+    uint32_t cr0 = spi_get_hw(spi)->cr0;
+    if (((cr0 & SPI_SSPCR0_DSS_BITS) >> SPI_SSPCR0_DSS_LSB) != (uint32_t)(bits - 1)) {
+        hw_clear_bits(&spi_get_hw(spi)->cr1, SPI_SSPCR1_SSE_BITS);
+        spi_get_hw(spi)->cr0 = (cr0 & ~SPI_SSPCR0_DSS_BITS) | ((bits - 1) << SPI_SSPCR0_DSS_LSB);
+        hw_set_bits(&spi_get_hw(spi)->cr1, SPI_SSPCR1_SSE_BITS);
+    }
+}
+
+static void __not_in_flash_func(spi_wait)(void) {
+    spi_inst_t *spi = pending_spi;
+    if (spi == NULL) {
+        return;
+    }
+    if (pending_ch >= 0) {
+        dma_channel_wait_for_finish_blocking(pending_ch);
+        dma_channel_unclaim(pending_ch);
+        pending_ch = -1;
+    }
+    while (spi_is_busy(spi)) {
+    }
+    while (spi_is_readable(spi)) {
+        (void)spi_get_hw(spi)->dr;
+    }
+    spi_get_hw(spi)->icr = SPI_SSPICR_RORIC_BITS;
+    spi_frame_bits(spi, 8);
+    pending_spi = NULL;
+}
+
+// Start sending count frames (8 or 16 bits) from src; incr false: repeat *src.
+// Returns at once when DMA is free, else sends with the CPU.
+static void __not_in_flash_func(spi_start)(spi_inst_t *spi, const void *src, size_t count, bool bits16, bool incr) {
+    spi_wait();
+    if (count == 0) {
+        return;
+    }
+    if (bits16) {
+        spi_frame_bits(spi, 16);
+    }
+    pending_spi = spi;
+    int ch = count >= 16 ? dma_claim_unused_channel(false) : -1;
+    if (ch < 0) {  // small, or no DMA channel free: CPU
+        for (size_t i = 0; i < count; i++) {
+            uint16_t v = bits16 ? ((const uint16_t *)src)[incr ? i : 0] : ((const uint8_t *)src)[incr ? i : 0];
+            while (!spi_is_writable(spi)) {
+                while (spi_is_readable(spi)) {
+                    (void)spi_get_hw(spi)->dr;
+                }
+            }
+            spi_get_hw(spi)->dr = v;
+        }
+        return;
+    }
+    dma_channel_config c = dma_channel_get_default_config(ch);
+    channel_config_set_transfer_data_size(&c, bits16 ? DMA_SIZE_16 : DMA_SIZE_8);
+    channel_config_set_read_increment(&c, incr);
+    channel_config_set_write_increment(&c, false);
+    channel_config_set_dreq(&c, spi_get_dreq(spi, true));
+    pending_ch = ch;
+    dma_channel_configure(ch, &c, &spi_get_hw(spi)->dr, src, count, true);
+}
+
+static void __not_in_flash_func(write_spi)(mp_obj_base_t *spi_obj, const uint8_t *buf, int len) {
+    spi_inst_t *spi = hw_spi(spi_obj);
+    if (spi) {
+        spi_start(spi, buf, len, false, true);
+        spi_wait();
+        return;
+    }
+    spi_wait();
     #ifdef MP_OBJ_TYPE_GET_SLOT
     mp_machine_spi_p_t *spi_p = (mp_machine_spi_p_t *)MP_OBJ_TYPE_GET_SLOT(spi_obj->type, protocol);
     #else
@@ -184,20 +289,100 @@ static bool overlay_dirty = false;
 static uint32_t skip_bytes = 0;  // pixel bytes of the current window to drop
 #define SKIP_ALL UINT32_MAX
 
-static void write_data(st7789_ST7789_obj_t *self, const uint8_t *buf, int len) {
+// Bytes of the current window still to drop (overlay); returns false when
+// nothing of the len bytes is left to send.
+static bool __not_in_flash_func(overlay_skip)(const uint8_t **buf, int *len) {
     if (skip_bytes) {
         if (skip_bytes == SKIP_ALL) {
-            return;
+            return false;
         }
-        if ((uint32_t)len <= skip_bytes) {
-            skip_bytes -= len;
-            return;
+        if ((uint32_t)*len <= skip_bytes) {
+            skip_bytes -= *len;
+            return false;
         }
-        buf += skip_bytes;
-        len -= skip_bytes;
+        *buf += skip_bytes;
+        *len -= skip_bytes;
         skip_bytes = 0;
     }
-    write_spi(self->spi_obj, buf, len);
+    return *len > 0;
+}
+
+static void __not_in_flash_func(write_data)(st7789_ST7789_obj_t *self, const uint8_t *buf, int len) {
+    if (overlay_skip(&buf, &len)) {
+        write_spi(self->spi_obj, buf, len);
+    }
+}
+
+// Like write_data, but returns while the bytes are still being sent: buf must
+// stay unchanged until the next CS/DC change or write (they wait for it).
+static void __not_in_flash_func(write_data_async)(st7789_ST7789_obj_t *self, const uint8_t *buf, int len) {
+    if (!overlay_skip(&buf, &len)) {
+        return;
+    }
+    spi_inst_t *spi = hw_spi(self->spi_obj);
+    if (spi) {
+        spi_start(spi, buf, len, false, true);
+    } else {
+        write_spi(self->spi_obj, buf, len);
+    }
+}
+
+// count pixels of one colour.
+static void __not_in_flash_func(write_fill)(st7789_ST7789_obj_t *self, uint16_t color, uint32_t count) {
+    spi_inst_t *spi = hw_spi(self->spi_obj);
+    if (skip_bytes) {
+        if (skip_bytes == SKIP_ALL || skip_bytes >= count * 2) {
+            skip_bytes = skip_bytes == SKIP_ALL ? SKIP_ALL : skip_bytes - count * 2;
+            return;
+        }
+        count -= skip_bytes / 2;
+        skip_bytes = 0;
+    }
+    if (spi) {
+        spi_wait();
+        fill_value = color;
+        spi_start(spi, &fill_value, count, true, false);
+        return;
+    }
+    uint16_t buffer[128];
+    uint16_t sw = _swap_bytes(color);
+    for (int i = 0; i < 128; i++) {
+        buffer[i] = sw;
+    }
+    while (count) {
+        uint32_t n = count < 128 ? count : 128;
+        write_spi(self->spi_obj, (uint8_t *)buffer, n * 2);
+        count -= n;
+    }
+}
+
+// count RGB565 pixels in native (little-endian) order, as framebuf keeps them.
+static void __not_in_flash_func(write_native)(st7789_ST7789_obj_t *self, const uint16_t *px, uint32_t count) {
+    if (skip_bytes) {
+        if (skip_bytes == SKIP_ALL || skip_bytes >= count * 2) {
+            skip_bytes = skip_bytes == SKIP_ALL ? SKIP_ALL : skip_bytes - count * 2;
+            return;
+        }
+        px += skip_bytes / 2;
+        count -= skip_bytes / 2;
+        skip_bytes = 0;
+    }
+    spi_inst_t *spi = hw_spi(self->spi_obj);
+    if (spi) {
+        spi_start(spi, px, count, true, true);
+        spi_wait();
+        return;
+    }
+    uint16_t buffer[128];
+    while (count) {
+        uint32_t n = count < 128 ? count : 128;
+        for (uint32_t i = 0; i < n; i++) {
+            buffer[i] = _swap_bytes(px[i]);
+        }
+        write_spi(self->spi_obj, (uint8_t *)buffer, n * 2);
+        px += n;
+        count -= n;
+    }
 }
 
 static void st7789_ST7789_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
@@ -206,7 +391,7 @@ static void st7789_ST7789_print(const mp_print_t *print, mp_obj_t self_in, mp_pr
     mp_printf(print, "<ST7789 width=%u, height=%u, spi=%p>", self->width, self->height, self->spi_obj);
 }
 
-static void write_cmd(st7789_ST7789_obj_t *self, uint8_t cmd, const uint8_t *data, int len) {
+static void __not_in_flash_func(write_cmd)(st7789_ST7789_obj_t *self, uint8_t cmd, const uint8_t *data, int len) {
     CS_LOW()
     if (cmd) {
         DC_LOW();
@@ -219,7 +404,7 @@ static void write_cmd(st7789_ST7789_obj_t *self, uint8_t cmd, const uint8_t *dat
     CS_HIGH()
 }
 
-static void set_window(st7789_ST7789_obj_t *self, uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
+static void __not_in_flash_func(set_window)(st7789_ST7789_obj_t *self, uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
     skip_bytes = 0;
     if (x0 > x1 || x1 >= self->width) {
         return;
@@ -258,9 +443,22 @@ static void set_window(st7789_ST7789_obj_t *self, uint16_t x0, uint16_t y0, uint
 
     uint8_t bufx[4] = {(x0 + self->colstart) >> 8, (x0 + self->colstart) & 0xFF, (x1 + self->colstart) >> 8, (x1 + self->colstart) & 0xFF};
     uint8_t bufy[4] = {(y0 + self->rowstart) >> 8, (y0 + self->rowstart) & 0xFF, (y1 + self->rowstart) >> 8, (y1 + self->rowstart) & 0xFF};
-    write_cmd(self, ST7789_CASET, bufx, 4);
-    write_cmd(self, ST7789_RASET, bufy, 4);
-    write_cmd(self, ST7789_RAMWR, NULL, 0);
+    CS_LOW();
+    DC_LOW();
+    uint8_t c = ST7789_CASET;
+    write_spi(self->spi_obj, &c, 1);
+    DC_HIGH();
+    write_spi(self->spi_obj, bufx, 4);
+    DC_LOW();
+    c = ST7789_RASET;
+    write_spi(self->spi_obj, &c, 1);
+    DC_HIGH();
+    write_spi(self->spi_obj, bufy, 4);
+    DC_LOW();
+    c = ST7789_RAMWR;
+    write_spi(self->spi_obj, &c, 1);
+    DC_HIGH();
+    CS_HIGH();
 }
 
 static mp_obj_t st7789_ST7789_set_window(size_t n_args, const mp_obj_t *args) {
@@ -275,26 +473,8 @@ static mp_obj_t st7789_ST7789_set_window(size_t n_args, const mp_obj_t *args) {
 
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(st7789_ST7789_set_window_obj, 5, 5, st7789_ST7789_set_window);
 
-static void fill_color_buffer(st7789_ST7789_obj_t *self, uint16_t color, int length) {
-    const int buffer_pixel_size = 128;
-    int chunks = length / buffer_pixel_size;
-    int rest = length % buffer_pixel_size;
-    uint16_t color_swapped = _swap_bytes(color);
-    uint16_t buffer[buffer_pixel_size];      // 128 pixels
-
-    // fill buffer with color data
-
-    for (int i = 0; i < length && i < buffer_pixel_size; i++) {
-        buffer[i] = color_swapped;
-    }
-    if (chunks) {
-        for (int j = 0; j < chunks; j++) {
-            write_data(self, (uint8_t *)buffer, buffer_pixel_size * 2);
-        }
-    }
-    if (rest) {
-        write_data(self, (uint8_t *)buffer, rest * 2);
-    }
+static void __not_in_flash_func(fill_color_buffer)(st7789_ST7789_obj_t *self, uint16_t color, int length) {
+    write_fill(self, color, length);
 }
 
 int mod(int x, int m) {
@@ -302,7 +482,7 @@ int mod(int x, int m) {
     return (r < 0) ? r + m : r;
 }
 
-void draw_pixel(st7789_ST7789_obj_t *self, int16_t x, int16_t y, uint16_t color) {
+void __not_in_flash_func(draw_pixel)(st7789_ST7789_obj_t *self, int16_t x, int16_t y, uint16_t color) {
     if ((self->options & OPTIONS_WRAP)) {
         if ((self->options & OPTIONS_WRAP_H) && ((x >= self->width) || (x < 0))) {
             x = mod(x, self->width);
@@ -323,7 +503,7 @@ void draw_pixel(st7789_ST7789_obj_t *self, int16_t x, int16_t y, uint16_t color)
     }
 }
 
-void fast_hline(st7789_ST7789_obj_t *self, int16_t x, int16_t y, int16_t w, uint16_t color) {
+void __not_in_flash_func(fast_hline)(st7789_ST7789_obj_t *self, int16_t x, int16_t y, int16_t w, uint16_t color) {
     if ((self->options & OPTIONS_WRAP) == 0) {
         if (y >= 0 && self->width > x && self->height > y) {
             if (0 > x) {
@@ -351,7 +531,7 @@ void fast_hline(st7789_ST7789_obj_t *self, int16_t x, int16_t y, int16_t w, uint
     }
 }
 
-static void fast_vline(st7789_ST7789_obj_t *self, int16_t x, int16_t y, int16_t h, uint16_t color) {
+static void __not_in_flash_func(fast_vline)(st7789_ST7789_obj_t *self, int16_t x, int16_t y, int16_t h, uint16_t color) {
     if ((self->options & OPTIONS_WRAP) == 0) {
         if (x >= 0 && self->width > x && self->height > y) {
             if (0 > y) {
@@ -512,7 +692,7 @@ static mp_obj_t st7789_ST7789_pixel(size_t n_args, const mp_obj_t *args) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(st7789_ST7789_pixel_obj, 4, 4, st7789_ST7789_pixel);
 
-static void line(st7789_ST7789_obj_t *self, int16_t x0, int16_t y0, int16_t x1, int16_t y1, int16_t color) {
+static void __not_in_flash_func(line)(st7789_ST7789_obj_t *self, int16_t x0, int16_t y0, int16_t x1, int16_t y1, int16_t color) {
     bool steep = ABS(y1 - y0) > ABS(x1 - x0);
     if (steep) {
         _swap_int16_t(x0, y0);
@@ -600,22 +780,32 @@ static mp_obj_t st7789_ST7789_blit_buffer(size_t n_args, const mp_obj_t *args) {
     DC_HIGH();
     CS_LOW();
 
-    const int buf_size = 256;
-    int limit = MIN(buf_info.len, w * h * 2);
-    int chunks = limit / buf_size;
-    int rest = limit % buf_size;
-    int i = 0;
-    for (; i < chunks; i++) {
-        write_data(self, (const uint8_t *)buf_info.buf + i * buf_size, buf_size);
-    }
-    if (rest) {
-        write_data(self, (const uint8_t *)buf_info.buf + i * buf_size, rest);
-    }
+    write_data(self, (const uint8_t *)buf_info.buf, MIN(buf_info.len, w * h * 2));
     CS_HIGH();
 
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(st7789_ST7789_blit_buffer_obj, 6, 6, st7789_ST7789_blit_buffer);
+
+// blit_framebuf(buf, x, y, w, h): RGB565 pixels in native order (as a
+// framebuf.FrameBuffer RGB565 keeps them), sent as 16-bit frames.
+static mp_obj_t st7789_ST7789_blit_framebuf(size_t n_args, const mp_obj_t *args) {
+    st7789_ST7789_obj_t *self = MP_OBJ_TO_PTR(args[0]);
+    mp_buffer_info_t bi;
+    mp_get_buffer_raise(args[1], &bi, MP_BUFFER_READ);
+    mp_int_t x = mp_obj_get_int(args[2]), y = mp_obj_get_int(args[3]);
+    mp_int_t w = mp_obj_get_int(args[4]), h = mp_obj_get_int(args[5]);
+    if (w <= 0 || h <= 0) {
+        return mp_const_none;
+    }
+    set_window(self, x, y, x + w - 1, y + h - 1);
+    DC_HIGH();
+    CS_LOW();
+    write_native(self, (const uint16_t *)bi.buf, MIN(bi.len / 2, (size_t)(w * h)));
+    CS_HIGH();
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(st7789_ST7789_blit_framebuf_obj, 6, 6, st7789_ST7789_blit_framebuf);
 
 static mp_obj_t st7789_ST7789_draw(size_t n_args, const mp_obj_t *args) {
     st7789_ST7789_obj_t *self = MP_OBJ_TO_PTR(args[0]);
@@ -1179,16 +1369,21 @@ static mp_obj_t smooth_text(st7789_ST7789_obj_t *self, mp_obj_dict_t *dict, cons
             }
             buf = m_new(uint16_t, cap);
         }
-        int sw = cap / rows;  // strip width in columns
+        // two halves: one is sent (DMA) while the next strip is drawn
+        uint16_t *half[2] = {buf, buf + cap / 2};
+        int sw = (cap / 2) / rows;  // strip width in columns
         if (sw < 1) {
             sw = 1;
-            rows = cap;  // buffer smaller than a column: should not happen
+            rows = cap / 2;  // buffer smaller than a column: should not happen
             by1 = by0 + rows;
         }
+        int hk = 0;
         for (int sx0 = bx0; sx0 < bx1; sx0 += sw) {
             int sx1 = sx0 + sw < bx1 ? sx0 + sw : bx1;
             int w = sx1 - sx0;
-            memset(buf, 0, (size_t)w * rows * 2);
+            uint16_t *strip = half[hk];
+            hk ^= 1;
+            memset(strip, 0, (size_t)w * rows * 2);
             for (size_t k = 0; k < n; k++) {
                 int i = gi[k];
                 int g0 = x + gx[k], g1 = g0 + gw[i];
@@ -1202,7 +1397,7 @@ static mp_obj_t smooth_text(st7789_ST7789_obj_t *self, mp_obj_dict_t *dict, cons
                     if (yy < by0 || yy >= by1) {
                         continue;
                     }
-                    uint16_t *row = buf + (yy - by0) * w;
+                    uint16_t *row = strip + (yy - by0) * w;
                     int ca = sx0 > g0 ? sx0 - g0 : 0;
                     int cb = sx1 < g1 ? sx1 - g0 : ww;
                     for (int c = ca; c < cb; c++) {
@@ -1216,14 +1411,14 @@ static mp_obj_t smooth_text(st7789_ST7789_obj_t *self, mp_obj_dict_t *dict, cons
                 }
             }
             for (int k = 0; k < w * rows; k++) {
-                buf[k] = lut[buf[k]];
+                strip[k] = lut[strip[k]];
             }
-            set_window(self, sx0, by0, sx1 - 1, by1 - 1);
+            set_window(self, sx0, by0, sx1 - 1, by1 - 1);  // waits for the last strip
             DC_HIGH();
             CS_LOW();
-            write_data(self, (uint8_t *)buf, w * rows * 2);
-            CS_HIGH();
+            write_data_async(self, (uint8_t *)strip, w * rows * 2);
         }
+        CS_HIGH();
         if (buf != self->i2c_buffer) {
             m_del(uint16_t, buf, cap);
         }
@@ -2582,12 +2777,12 @@ static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(st7789_ST7789_fill_polygon_obj, 4, 8,
 // smooth edges. Coverage: 4 sub-rows a pixel, exact horizontal span overlap.
 // Drawn in strips through the resident buffer (one blit each).
 
-#define AA_SUB 4
+#define AA_SUB 4   // sub-rows a pixel
+#define AA_FIX 16  // coordinates in 1/16 pixel
 
-static int cmp_float(const void *a, const void *b) {
-    float d = *(const float *)a - *(const float *)b;
-    return (d > 0) - (d < 0);
-}
+typedef struct {
+    int32_t x0, y0, y1, dx, dy;  // from (x0, y0) going down to y1 (AA_FIX units)
+} aa_edge_t;
 
 static inline uint16_t blend565(uint16_t b, uint16_t f, int a) {  // a 0..256
     int br = b >> 11, bg = (b >> 5) & 0x3F, bb = b & 0x1F;
@@ -2595,6 +2790,48 @@ static inline uint16_t blend565(uint16_t b, uint16_t f, int a) {  // a 0..256
     return ((br + (((fr - br) * a + 128) >> 8)) << 11)
            | ((bg + (((fg - bg) * a + 128) >> 8)) << 5)
            | (bb + (((fb - bb) * a + 128) >> 8));
+}
+
+// Add one shape's coverage of display row y (0..256 a pixel) to cov[0..w).
+static bool aa_row(const aa_edge_t *e, int ne, int y, int bx0, int w, uint16_t *cov, int32_t *xs) {
+    bool any = false;
+    const int32_t px = AA_FIX, wf = w * AA_FIX, unit = 256 / AA_SUB;
+    for (int s = 0; s < AA_SUB; s++) {
+        int32_t fy = y * AA_FIX + (2 * s + 1) * AA_FIX / (2 * AA_SUB);
+        int nx = 0;
+        for (int i = 0; i < ne; i++) {
+            if (fy >= e[i].y0 && fy < e[i].y1) {
+                int32_t x = e[i].x0 + (fy - e[i].y0) * e[i].dx / e[i].dy - bx0 * AA_FIX;
+                int k = nx++;  // insertion sort: a few crossings
+                while (k > 0 && xs[k - 1] > x) {
+                    xs[k] = xs[k - 1];
+                    k--;
+                }
+                xs[k] = x;
+            }
+        }
+        for (int i = 0; i + 1 < nx; i += 2) {
+            int32_t xa = xs[i] < 0 ? 0 : xs[i];
+            int32_t xb = xs[i + 1] > wf ? wf : xs[i + 1];
+            if (xb <= xa) {
+                continue;
+            }
+            any = true;
+            int pa = xa / px, pb = xb / px;
+            if (pa == pb) {
+                cov[pa] += (xb - xa) * unit / px;
+                continue;
+            }
+            cov[pa] += ((pa + 1) * px - xa) * unit / px;
+            for (int q = pa + 1; q < pb; q++) {
+                cov[q] += unit;
+            }
+            if (pb < w) {
+                cov[pb] += (xb - pb * px) * unit / px;
+            }
+        }
+    }
+    return any;
 }
 
 static mp_obj_t st7789_ST7789_fill_shapes(size_t n_args, const mp_obj_t *args) {
@@ -2614,7 +2851,8 @@ static mp_obj_t st7789_ST7789_fill_shapes(size_t n_args, const mp_obj_t *args) {
         return mp_const_none;
     }
 
-    // all points as floats: shape k uses pts[start[k] .. start[k+1])
+    // edges of every shape (horizontal ones dropped): shape k uses
+    // edges[start[k] .. start[k+1]) and rows ylo[k] .. yhi[k]
     size_t total = 0;
     for (size_t k = 0; k < ns; k++) {
         size_t two, np;
@@ -2626,86 +2864,80 @@ static mp_obj_t st7789_ST7789_fill_shapes(size_t n_args, const mp_obj_t *args) {
         mp_obj_get_array(sh[0], &np, &pl);
         total += np;
     }
-    float *px = m_new(float, 2 * total);
-    float *py = px + total;
+    aa_edge_t *edges = m_new(aa_edge_t, total);
     size_t *start = m_new(size_t, ns + 1);
-    uint16_t *color = m_new(uint16_t, ns);
-    size_t maxn = 0;
-    total = 0;
+    uint16_t *color = m_new(uint16_t, 3 * ns);
+    int16_t *ylo = (int16_t *)(color + ns), *yhi = ylo + ns;
+    size_t ne = 0, maxe = 0;
     for (size_t k = 0; k < ns; k++) {
         size_t two, np;
         mp_obj_t *sh, *pl;
         mp_obj_get_array(shapes[k], &two, &sh);
         mp_obj_get_array(sh[0], &np, &pl);
         color[k] = mp_obj_get_int(sh[1]);
-        start[k] = total;
-        for (size_t i = 0; i < np; i++) {
-            size_t two2;
-            mp_obj_t *xy;
-            mp_obj_get_array(pl[i], &two2, &xy);
-            px[total] = mp_obj_get_float(xy[0]);
-            py[total++] = mp_obj_get_float(xy[1]);
+        start[k] = ne;
+        int32_t miny = INT32_MAX, maxy = INT32_MIN, fx = 0, fy = 0, lx = 0, ly = 0;
+        for (size_t i = 0; i <= np; i++) {
+            int32_t x, y;
+            if (i < np) {
+                size_t two2;
+                mp_obj_t *xy;
+                mp_obj_get_array(pl[i], &two2, &xy);
+                x = (int32_t)(mp_obj_get_float(xy[0]) * AA_FIX + 0.5f);
+                y = (int32_t)(mp_obj_get_float(xy[1]) * AA_FIX + 0.5f);
+            } else {
+                x = fx, y = fy;  // close the polygon
+            }
+            if (i == 0) {
+                fx = x, fy = y;
+            } else if (y != ly) {
+                aa_edge_t *e = &edges[ne++];
+                if (ly < y) {
+                    e->x0 = lx, e->y0 = ly, e->y1 = y, e->dx = x - lx, e->dy = y - ly;
+                } else {
+                    e->x0 = x, e->y0 = y, e->y1 = ly, e->dx = lx - x, e->dy = ly - y;
+                }
+            }
+            if (y < miny) miny = y;
+            if (y > maxy) maxy = y;
+            lx = x, ly = y;
         }
-        if (np > maxn) maxn = np;
+        ylo[k] = miny / AA_FIX;
+        yhi[k] = maxy / AA_FIX;
+        if (ne - start[k] > maxe) maxe = ne - start[k];
     }
-    start[ns] = total;
-    float *xs = m_new(float, maxn + 1);
-    uint16_t *cov = m_new(uint16_t, w);  // 0..256 per pixel
+    start[ns] = ne;
+    int32_t *xs = m_new(int32_t, maxe + 1);
+    uint16_t *cov = m_new(uint16_t, w);
 
     size_t cap = self->buffer_size / 2;
     uint16_t *buf = self->i2c_buffer;
-    if (cap < (size_t)w || buf == NULL) {
-        cap = (size_t)w * 8;
+    if (cap < (size_t)w * 2 || buf == NULL) {
+        cap = (size_t)w * 16;
         buf = m_new(uint16_t, cap);
     }
-    int strip = cap / w;
+    // two halves: one is sent (DMA) while the next strip is drawn
+    uint16_t *half[2] = {buf, buf + cap / 2};
+    int strip = (cap / 2) / w, hk = 0;
     for (int sy0 = by0; sy0 < by1; sy0 += strip) {
         int sy1 = sy0 + strip < by1 ? sy0 + strip : by1;
+        uint16_t *out = half[hk];
+        hk ^= 1;
         for (int i = 0; i < w * (sy1 - sy0); i++) {
-            buf[i] = bg;
+            out[i] = bg;
         }
         for (size_t k = 0; k < ns; k++) {
-            size_t a = start[k], n = start[k + 1] - a;
-            if (n < 3) continue;
             for (int y = sy0; y < sy1; y++) {
-                memset(cov, 0, w * 2);
-                bool any = false;
-                for (int s = 0; s < AA_SUB; s++) {
-                    float fy = y + (s + 0.5f) / AA_SUB;
-                    int nx = 0;
-                    for (size_t i = 0; i < n; i++) {
-                        size_t j = i + 1 < n ? i + 1 : 0;
-                        float y0 = py[a + i], y1 = py[a + j];
-                        if ((y0 <= fy && y1 > fy) || (y1 <= fy && y0 > fy)) {
-                            xs[nx++] = px[a + i] + (fy - y0) * (px[a + j] - px[a + i]) / (y1 - y0);
-                        }
-                    }
-                    if (nx < 2) continue;
-                    qsort(xs, nx, sizeof(float), cmp_float);
-                    for (int i = 0; i + 1 < nx; i += 2) {
-                        float xa = xs[i] - bx0, xb = xs[i + 1] - bx0;
-                        if (xa < 0) xa = 0;
-                        if (xb > w) xb = w;
-                        if (xb <= xa) continue;
-                        any = true;
-                        int pa = (int)xa, pb = (int)xb;
-                        if (pa == pb) {
-                            cov[pa] += (int)((xb - xa) * (256 / AA_SUB) + 0.5f);
-                            continue;
-                        }
-                        cov[pa] += (int)((pa + 1 - xa) * (256 / AA_SUB) + 0.5f);
-                        for (int q = pa + 1; q < pb; q++) {
-                            cov[q] += 256 / AA_SUB;
-                        }
-                        if (pb < w) {
-                            cov[pb] += (int)((xb - pb) * (256 / AA_SUB) + 0.5f);
-                        }
-                    }
+                if (y < ylo[k] || y > yhi[k]) {
+                    continue;
                 }
-                if (!any) continue;
-                uint16_t *row = buf + (y - sy0) * w;
+                memset(cov, 0, w * 2);
+                if (!aa_row(edges + start[k], start[k + 1] - start[k], y, bx0, w, cov, xs)) {
+                    continue;
+                }
+                uint16_t *row = out + (y - sy0) * w;
                 for (int q = 0; q < w; q++) {
-                    int c = cov[q] > 256 ? 256 : cov[q];
+                    int c = cov[q];
                     if (c >= 255) {
                         row[q] = color[k];
                     } else if (c) {
@@ -2715,22 +2947,22 @@ static mp_obj_t st7789_ST7789_fill_shapes(size_t n_args, const mp_obj_t *args) {
             }
         }
         for (int i = 0; i < w * (sy1 - sy0); i++) {
-            buf[i] = _swap_bytes(buf[i]);
+            out[i] = _swap_bytes(out[i]);
         }
-        set_window(self, bx0, sy0, bx1 - 1, sy1 - 1);
+        set_window(self, bx0, sy0, bx1 - 1, sy1 - 1);  // waits for the last strip
         DC_HIGH();
         CS_LOW();
-        write_data(self, (uint8_t *)buf, w * (sy1 - sy0) * 2);
-        CS_HIGH();
+        write_data_async(self, (uint8_t *)out, w * (sy1 - sy0) * 2);
     }
+    CS_HIGH();
     if (buf != self->i2c_buffer) {
         m_del(uint16_t, buf, cap);
     }
     m_del(uint16_t, cov, w);
-    m_del(float, xs, maxn + 1);
-    m_del(uint16_t, color, ns);
-    m_del(float, px, 2 * start[ns]);
+    m_del(int32_t, xs, maxe + 1);
+    m_del(uint16_t, color, 3 * ns);
     m_del(size_t, start, ns + 1);
+    m_del(aa_edge_t, edges, total);
     return mp_const_none;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(st7789_ST7789_fill_shapes_obj, 7, 7, st7789_ST7789_fill_shapes);
@@ -2789,6 +3021,7 @@ static const mp_rom_map_elem_t st7789_ST7789_locals_dict_table[] = {
     {MP_ROM_QSTR(MP_QSTR_rect), MP_ROM_PTR(&st7789_ST7789_rect_obj)},
     {MP_ROM_QSTR(MP_QSTR_text), MP_ROM_PTR(&st7789_ST7789_text_obj)},
     {MP_ROM_QSTR(MP_QSTR_fill_shapes), MP_ROM_PTR(&st7789_ST7789_fill_shapes_obj)},
+    {MP_ROM_QSTR(MP_QSTR_blit_framebuf), MP_ROM_PTR(&st7789_ST7789_blit_framebuf_obj)},
     {MP_ROM_QSTR(MP_QSTR_rotation), MP_ROM_PTR(&st7789_ST7789_rotation_obj)},
     {MP_ROM_QSTR(MP_QSTR_width), MP_ROM_PTR(&st7789_ST7789_width_obj)},
     {MP_ROM_QSTR(MP_QSTR_height), MP_ROM_PTR(&st7789_ST7789_height_obj)},
@@ -2988,6 +3221,20 @@ static mp_obj_t st7789_overlay_bypass(mp_obj_t flag) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_1(st7789_overlay_bypass_obj, st7789_overlay_bypass);
 
+// spi_clock(): run the peripheral clock (SPI, UART) from the system clock,
+// as machine.freq(f, f) does, but without restarting the PLL: SPI can then go
+// up to f/2 (62.5 MHz at 125 MHz) instead of 24 MHz. Returns f. Create the
+// SPI (and UARTs) after calling it. A later machine.freq(f) puts the
+// peripheral clock back to 48 MHz: SPI then runs slower, never faster.
+static mp_obj_t st7789_spi_clock(void) {
+    uint32_t sys = clock_get_hz(clk_sys);
+    if (clock_get_hz(clk_peri) != sys) {
+        clock_configure(clk_peri, 0, CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLK_SYS, sys, sys);
+    }
+    return mp_obj_new_int(sys);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(st7789_spi_clock_obj, st7789_spi_clock);
+
 // _overlay_dirty(): True once after the dot was drawn over or the panel was reset.
 static mp_obj_t st7789_overlay_dirty(void) {
     bool d = overlay_dirty;
@@ -3002,6 +3249,7 @@ static const mp_map_elem_t st7789_module_globals_table[] = {
     {MP_ROM_QSTR(MP_QSTR_map_bitarray_to_rgb565), (mp_obj_t)&st7789_map_bitarray_to_rgb565_obj},
     {MP_ROM_QSTR(MP_QSTR_ST7789), (mp_obj_t)&st7789_ST7789_type},
     {MP_ROM_QSTR(MP_QSTR__overlay), (mp_obj_t)&st7789_overlay_obj},
+    {MP_ROM_QSTR(MP_QSTR_spi_clock), (mp_obj_t)&st7789_spi_clock_obj},
     {MP_ROM_QSTR(MP_QSTR__overlay_bypass), (mp_obj_t)&st7789_overlay_bypass_obj},
     {MP_ROM_QSTR(MP_QSTR__overlay_dirty), (mp_obj_t)&st7789_overlay_dirty_obj},
     {MP_ROM_QSTR(MP_QSTR_BLACK), MP_ROM_INT(BLACK)},

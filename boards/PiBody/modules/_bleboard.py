@@ -70,7 +70,7 @@ def _panel():
         class _fonts:  # the display's Roboto fonts (drawn by st7789 text())
             small, medium, large = sans16, sans20, sans32b
         _d = st7789.ST7789(
-            SPI(1, baudrate=db.BAUDRATE, sck=Pin("DISPLAY_SCK"), mosi=Pin("DISPLAY_MOSI")),
+            db.display_spi(),
             W, H,
             reset=Pin("DISPLAY_RESET", Pin.OUT),
             dc=Pin("DISPLAY_DC", Pin.OUT),
