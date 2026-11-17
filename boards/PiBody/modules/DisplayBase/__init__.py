@@ -1,9 +1,8 @@
 from machine import Pin, SPI
 import st7789
-from . import vga2_8x16
-from . import vga2_10x20
-from . import vga2_12x24
-from . import vga2_16x32 
+# One font family (Roboto, anti-aliased, proportional) in four sizes, made
+# by tools/makefont.swift: ASCII, Russian, Kazakh and other Cyrillic letters.
+from . import sans16, sans20, sans24, sans32b
 
 DISPLAY_BUF_SIZE = 80 * 80 * 2
 BAUDRATE = 60_000_000
@@ -21,10 +20,11 @@ class _NoBar:
 
 
 class DisplayBase(st7789.ST7789):
-    font_small = vga2_8x16
-    font_medium = vga2_10x20
-    font_large = vga2_12x24
-    font_bold = vga2_16x32
+    # line heights 16, 20, 24 and 32 rows, like the old VGA fonts
+    font_small = sans16
+    font_medium = sans20
+    font_large = sans24
+    font_bold = sans32b
     
     # Singleton instance
     _instance = None
@@ -63,24 +63,27 @@ class DisplayBase(st7789.ST7789):
         self.height = HEIGHT
 
     
-    def smooth_text(self, text, x, y, font=None, fg=st7789.WHITE, bg=st7789.BLACK):
-        """Anti-aliased proportional text (Roboto). font: DisplayBase.sans13,
-        sans13b, sans17b (default) or sans24b. Returns the x after the text."""
-        from . import smoothtext
-        if font is None:
-            from . import sans17b as font
-        return smoothtext.draw(self, text, x, y, font, fg, bg, self.width)
-
-    def smooth_width(self, text, font=None):
-        """Width in pixels of smooth_text(text, font=font)."""
-        from . import smoothtext
-        if font is None:
-            from . import sans17b as font
-        return smoothtext.width(text, font)
-
     def text(self, text, x, y, font=font_small, fg=st7789.WHITE, bg=st7789.BLACK):
-        super().text(font, text, x, y, fg, bg)
+        """Draw text with its top-left at x, y on a bg box font.HEIGHT rows tall.
+        Returns the x after the text."""
+        return super().text(font, text, x, y, fg, bg)
 
+    def text_width(self, text, font=font_small):
+        """Width in pixels of text drawn with font."""
+        chars, adv = font.CHARS, font.ADV
+        q = chars.find("?")
+        w = 0
+        for ch in text:
+            i = chars.find(ch)
+            w += adv[i if i >= 0 else q]
+        return w
+
+    # names from the first smooth-text version
+    def smooth_text(self, text, x, y, font=font_medium, fg=st7789.WHITE, bg=st7789.BLACK):
+        return self.text(text, x, y, font, fg, bg)
+
+    def smooth_width(self, text, font=font_medium):
+        return self.text_width(text, font)
 
     def hsv(self, h, s, v):
         """

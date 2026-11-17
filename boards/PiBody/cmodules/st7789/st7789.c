@@ -1063,6 +1063,176 @@ static mp_obj_t st7789_ST7789_bitmap(size_t n_args, const mp_obj_t *args) {
 
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(st7789_ST7789_bitmap_obj, 4, 5, st7789_ST7789_bitmap);
 
+// --- Smooth fonts ----------------------------------------------------------
+// Proportional anti-aliased fonts made by tools/makefont.swift: CHARS (str),
+// ADV, XOFF (+128), GW, YOFF, GH, OFFS (uint16 LE), BITMAP (4 bits a pixel,
+// GH rows of GW pixels per glyph). A line is drawn as one box HEIGHT rows tall
+// (text and background), in column strips that fit self->i2c_buffer: glyph
+// alpha is max-composited into the strip, then mapped to 16 blended colours.
+
+static const uint8_t *font_buf(mp_obj_dict_t *dict, qstr name) {
+    mp_buffer_info_t bi;
+    mp_get_buffer_raise(mp_obj_dict_get(dict, MP_OBJ_NEW_QSTR(name)), &bi, MP_BUFFER_READ);
+    return bi.buf;
+}
+
+// Index of codepoint c in CHARS, or -1.
+static int font_index(const uint8_t *chars, size_t len, unichar c) {
+    // ASCII 32..126 come first, in order
+    if (c >= 32 && c <= 126 && (size_t)(c - 32) < len && chars[c - 32] == c) {
+        return c - 32;
+    }
+    const uint8_t *p = chars, *end = chars + len;
+    for (int i = 0; p < end; i++) {
+        if (utf8_get_char(p) == c) {
+            return i;
+        }
+        p = utf8_next_char(p);
+    }
+    return -1;
+}
+
+static mp_obj_t smooth_text(st7789_ST7789_obj_t *self, mp_obj_dict_t *dict, const uint8_t *src,
+    size_t src_len, bool bytes, mp_int_t x, mp_int_t y, uint16_t fg, uint16_t bg) {
+    size_t chars_len;
+    const uint8_t *chars = (const uint8_t *)mp_obj_str_get_data(
+        mp_obj_dict_get(dict, MP_OBJ_NEW_QSTR(MP_QSTR_CHARS)), &chars_len);
+    const int h = mp_obj_get_int(mp_obj_dict_get(dict, MP_OBJ_NEW_QSTR(MP_QSTR_HEIGHT)));
+    const uint8_t *adv = font_buf(dict, MP_QSTR_ADV);
+    const uint8_t *xoff = font_buf(dict, MP_QSTR_XOFF);
+    const uint8_t *gw = font_buf(dict, MP_QSTR_GW);
+    const uint8_t *yoff = font_buf(dict, MP_QSTR_YOFF);
+    const uint8_t *gh = font_buf(dict, MP_QSTR_GH);
+    const uint8_t *offs = font_buf(dict, MP_QSTR_OFFS);
+    const uint8_t *bmp = font_buf(dict, MP_QSTR_BITMAP);
+    int qmark = font_index(chars, chars_len, '?');
+
+    // layout: glyph index and x for each character
+    size_t n = 0;
+    uint16_t *gi = m_new(uint16_t, src_len + 1);
+    int16_t *gx = m_new(int16_t, src_len + 1);
+    int pen = 0, left = 0, right = 0;
+    const uint8_t *p = src, *end = src + src_len;
+    while (p < end) {
+        unichar c;
+        if (bytes) {
+            c = *p++;
+        } else {
+            c = utf8_get_char(p);
+            p = utf8_next_char(p);
+        }
+        int i = font_index(chars, chars_len, c);
+        if (i < 0) {
+            i = qmark;
+        }
+        if (i < 0) {
+            continue;
+        }
+        int g = pen + xoff[i] - 128;
+        if (gw[i]) {
+            gi[n] = i;
+            gx[n++] = g;
+            if (g < left) {
+                left = g;
+            }
+            if (g + gw[i] > right) {
+                right = g + gw[i];
+            }
+        }
+        pen += adv[i];
+    }
+    if (pen > right) {
+        right = pen;
+    }
+
+    // visible box on the screen
+    int bx0 = x + left, bx1 = x + right;  // [bx0, bx1)
+    int by0 = y, by1 = y + h;
+    if (bx0 < 0) {
+        bx0 = 0;
+    }
+    if (bx1 > self->width) {
+        bx1 = self->width;
+    }
+    if (by0 < 0) {
+        by0 = 0;
+    }
+    if (by1 > self->height) {
+        by1 = self->height;
+    }
+    int rows = by1 - by0;
+    if (bx1 > bx0 && rows > 0) {
+        // 16 colours from bg to fg, byte-swapped for the panel
+        uint16_t lut[16];
+        int fr = fg >> 11, fgg = (fg >> 5) & 0x3F, fb = fg & 0x1F;
+        int br = bg >> 11, bgg = (bg >> 5) & 0x3F, bb = bg & 0x1F;
+        for (int a = 0; a < 16; a++) {
+            uint16_t c = ((br + (fr - br) * a / 15) << 11) | ((bgg + (fgg - bgg) * a / 15) << 5) | (bb + (fb - bb) * a / 15);
+            lut[a] = _swap_bytes(c);
+        }
+        size_t cap = self->buffer_size / 2;
+        uint16_t *buf = self->i2c_buffer;
+        if (cap == 0 || buf == NULL) {
+            cap = (size_t)(bx1 - bx0) * rows;
+            if (cap > 4096) {
+                cap = 4096;
+            }
+            buf = m_new(uint16_t, cap);
+        }
+        int sw = cap / rows;  // strip width in columns
+        if (sw < 1) {
+            sw = 1;
+            rows = cap;  // buffer smaller than a column: should not happen
+            by1 = by0 + rows;
+        }
+        for (int sx0 = bx0; sx0 < bx1; sx0 += sw) {
+            int sx1 = sx0 + sw < bx1 ? sx0 + sw : bx1;
+            int w = sx1 - sx0;
+            memset(buf, 0, (size_t)w * rows * 2);
+            for (size_t k = 0; k < n; k++) {
+                int i = gi[k];
+                int g0 = x + gx[k], g1 = g0 + gw[i];
+                if (g1 <= sx0 || g0 >= sx1) {
+                    continue;
+                }
+                const uint8_t *b = bmp + (offs[2 * i] | offs[2 * i + 1] << 8);
+                int ww = gw[i];
+                for (int r = 0; r < gh[i]; r++) {
+                    int yy = y + yoff[i] + r;
+                    if (yy < by0 || yy >= by1) {
+                        continue;
+                    }
+                    uint16_t *row = buf + (yy - by0) * w;
+                    int ca = sx0 > g0 ? sx0 - g0 : 0;
+                    int cb = sx1 < g1 ? sx1 - g0 : ww;
+                    for (int c = ca; c < cb; c++) {
+                        int bit = r * ww + c;
+                        int v = (bit & 1) ? (b[bit >> 1] & 15) : (b[bit >> 1] >> 4);
+                        uint16_t *d = row + g0 + c - sx0;
+                        if (v > *d) {
+                            *d = v;
+                        }
+                    }
+                }
+            }
+            for (int k = 0; k < w * rows; k++) {
+                buf[k] = lut[buf[k]];
+            }
+            set_window(self, sx0, by0, sx1 - 1, by1 - 1);
+            DC_HIGH();
+            CS_LOW();
+            write_data(self, (uint8_t *)buf, w * rows * 2);
+            CS_HIGH();
+        }
+        if (buf != self->i2c_buffer) {
+            m_del(uint16_t, buf, cap);
+        }
+    }
+    m_del(uint16_t, gi, src_len + 1);
+    m_del(int16_t, gx, src_len + 1);
+    return mp_obj_new_int(x + pen);
+}
+
 static mp_obj_t st7789_ST7789_text(size_t n_args, const mp_obj_t *args) {
     st7789_ST7789_obj_t *self = MP_OBJ_TO_PTR(args[0]);
     const uint8_t *source = NULL;
@@ -1093,6 +1263,20 @@ static mp_obj_t st7789_ST7789_text(size_t n_args, const mp_obj_t *args) {
     mp_int_t y0 = mp_obj_get_int(args[4]);
 
     mp_obj_dict_t *dict = MP_OBJ_TO_PTR(font->globals);
+    if (mp_map_lookup(&dict->map, MP_OBJ_NEW_QSTR(MP_QSTR_BITMAP), MP_MAP_LOOKUP)) {
+        uint16_t fg = (n_args > 5) ? mp_obj_get_int(args[5]) : WHITE;
+        uint16_t bg = (n_args > 6) ? mp_obj_get_int(args[6]) : BLACK;
+        if (mp_obj_is_int(args[2])) {
+            vstr_t v;
+            vstr_init(&v, 4);
+            vstr_add_char(&v, mp_obj_get_int(args[2]));
+            mp_obj_t one = mp_obj_new_str_from_vstr(&v);
+            size_t ul;
+            const uint8_t *u = (const uint8_t *)mp_obj_str_get_data(one, &ul);
+            return smooth_text(self, dict, u, ul, false, x0, y0, fg, bg);
+        }
+        return smooth_text(self, dict, source, source_len, !mp_obj_is_str(args[2]), x0, y0, fg, bg);
+    }
     const uint8_t width  = mp_obj_get_int(mp_obj_dict_get(dict, MP_OBJ_NEW_QSTR(MP_QSTR_WIDTH)));
     const uint8_t height = mp_obj_get_int(mp_obj_dict_get(dict, MP_OBJ_NEW_QSTR(MP_QSTR_HEIGHT)));
     const uint16_t first = mp_obj_get_int(mp_obj_dict_get(dict, MP_OBJ_NEW_QSTR(MP_QSTR_FIRST)));

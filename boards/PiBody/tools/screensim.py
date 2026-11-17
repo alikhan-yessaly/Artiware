@@ -31,6 +31,41 @@ class _Clip:
     dirty = False
 
 
+def smooth_layout(font, s):
+    """Like st7789.c smooth_text(): [(glyph, x)], left, right, pen."""
+    chars = font.CHARS
+    q = chars.find("?")
+    pen = left = right = 0
+    out = []
+    for ch in s:
+        i = chars.find(ch)
+        if i < 0:
+            i = q
+        g = pen + font.XOFF[i] - 128
+        if font.GW[i]:
+            out.append((i, g))
+            left, right = min(left, g), max(right, g + font.GW[i])
+        pen += font.ADV[i]
+    return out, left, max(right, pen), pen
+
+
+def smooth_alpha(font, s):
+    """Alpha (0..15) rows of a line of text, and its left offset and advance."""
+    glyphs, left, right, pen = smooth_layout(font, s)
+    a = [[0] * (right - left) for _ in range(font.HEIGHT)]
+    for i, gx in glyphs:
+        off = font.OFFS[2 * i] | font.OFFS[2 * i + 1] << 8
+        w = font.GW[i]
+        for r in range(font.GH[i]):
+            for c in range(w):
+                bit = r * w + c
+                b = font.BITMAP[off + (bit >> 1)]
+                v = b & 15 if bit & 1 else b >> 4
+                row = a[font.YOFF[i] + r]
+                row[gx - left + c] = max(row[gx - left + c], v)
+    return a, left, pen
+
+
 def _make_st7789():
     m = types.ModuleType("st7789")
     clip = _Clip()
@@ -165,12 +200,33 @@ def _make_st7789():
                     for px in range(nodes[k], nodes[k + 1] + 1):
                         put(px + x, py + y, c)
 
+        def clear(self):
+            self.fill(0)
+
+        def vscrdef(self, *a):
+            pass
+
+        def vscsad(self, a):
+            pass  # hardware scrolling is not simulated
+
         def blit_buffer(self, buf, x, y, w, h):
             buf = bytes(buf)
             for i in range(min(len(buf) // 2, w * h)):
                 put(x + i % w, y + i // w, buf[2 * i] << 8 | buf[2 * i + 1])
 
         def text(self, font, s, x0, y0, fg=0xFFFF, bg=0x0000):
+            if isinstance(s, int):
+                s = chr(s)
+            if hasattr(font, "BITMAP"):
+                a, left, pen = smooth_alpha(font, s)
+                fr, fgg, fb = fg >> 11, fg >> 5 & 63, fg & 31
+                br, bgg, bb = bg >> 11, bg >> 5 & 63, bg & 31
+                lut = [(br + (fr - br) * k // 15) << 11 | (bgg + (fgg - bgg) * k // 15) << 5
+                       | (bb + (fb - bb) * k // 15) for k in range(16)]
+                for r, row in enumerate(a):
+                    for c, v in enumerate(row):
+                        put(x0 + left + c, y0 + r, lut[v])
+                return x0 + pen
             w, h = font.WIDTH, font.HEIGHT
             data = font.FONT if hasattr(font, "FONT") else font._FONT
             per = round(h * (w // 8 + (w % 8) / 8.0))
@@ -342,7 +398,7 @@ class Board:
 def sheet(frames, path, scale=2):
     """frames: [(label, rows)] side by side with labels under each."""
     import importlib
-    font = importlib.import_module("DisplayBase.vga2_8x16")
+    font = importlib.import_module("DisplayBase.sans16")
     gap, lab = 8, 20
     n = len(frames)
     sw, sh = n * (W + gap) + gap, H + lab + 2 * gap
@@ -353,14 +409,11 @@ def sheet(frames, path, scale=2):
         for y in range(H):
             for x in range(W):
                 out[gap + y][ox + x] = _rgb(rows[y][x])
-        data = font._FONT if hasattr(font, "_FONT") else font.FONT
-        x0 = ox
-        for ch in label[:W // 8]:
-            base = (ord(ch) - font.FIRST) * 16
-            for i2 in range(128):
-                if data[base + i2 // 8] >> (7 - i2 % 8) & 1:
-                    out[gap + H + 4 + i2 // 8][x0 + i2 % 8] = (230, 230, 230)
-            x0 += 8
+        a, left, _ = smooth_alpha(font, label)
+        for r, row in enumerate(a):
+            for c, v in enumerate(row[:W]):
+                k = 40 + 190 * v // 15
+                out[gap + H + 2 + r][ox + max(0, left + c)] = (k, k, k + 4 if k < 250 else k)
     write_png(path, out, scale)
 
 
@@ -399,21 +452,29 @@ def scenarios(libs):
         d.text("Hello", 10, 4, d.font_bold, d.WHITE, d.BLACK)
         bd.tick()
         out.append(("bar.dot()", bd.frame()))
-    # smooth_text for students, all four fonts, Latin and Cyrillic
+    # the four display fonts, Latin, Russian and Kazakh
     if libs:
         bd = Board(libs)
         d = bd.display()
-        from DisplayBase import sans24b, sans17b, sans13b, sans13
         d.fill(d.BLACK)
-        y = 10
-        for f in (sans24b, sans17b, sans13b, sans13):
-            d.smooth_text(f.NAME, 8, y, f, d.WHITE, d.BLACK)
-            y += f.HEIGHT + 4
-            d.smooth_text("Сәлем, PiBody! Қазақша", 8, y, f, d.YELLOW, d.BLACK)
-            y += f.HEIGHT + 10
-        d.fill_rect(0, y, 240, 40, 0x18E4)
-        d.smooth_text("Score: 1280", 8, y + 6, sans24b, d.CYAN, 0x18E4)
-        out.append(("smooth_text", bd.frame()))
+        y = 4
+        for f in (d.font_small, d.font_medium, d.font_large, d.font_bold):
+            d.text(f.NAME, 6, y, f, d.WHITE, d.BLACK)
+            y += f.HEIGHT
+            d.text("Привет! Сәлем, Қазақстан", 6, y, f, d.YELLOW, d.BLACK)
+            y += f.HEIGHT + 6
+        d.text("ӘәҒғҚқҢңӨөҰұҮүҺһІі", 6, y, d.font_medium, d.CYAN, d.BLACK)
+        y += 24
+        d.fill_rect(0, y, 240, 32, 0x18E4)
+        d.text("Score: 1280", 6, y + 4, d.font_large, d.GREEN, 0x18E4)
+        out.append(("fonts", bd.frame()))
+        # Display.print() console
+        bd = Board(libs)
+        d = bd.display()
+        d.clear()
+        for k in range(6):
+            d.print("line", k, "temperature 23.5 C, влажность 40%")
+        out.append(("display.print", bd.frame()))
 
     # button-hold feedback screens
     import io

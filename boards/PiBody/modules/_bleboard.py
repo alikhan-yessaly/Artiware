@@ -65,10 +65,10 @@ def _panel():
         import DisplayBase as db
         from machine import Pin, SPI
         import st7789
-        from DisplayBase import sans13, sans13b, sans17b, sans24b
+        from DisplayBase import sans16, sans20, sans32b
 
-        class _fonts:  # smooth Roboto fonts (DisplayBase.smoothtext)
-            small, small_bold, medium, large = sans13, sans13b, sans17b, sans24b
+        class _fonts:  # the display's Roboto fonts (drawn by st7789 text())
+            small, medium, large = sans16, sans20, sans32b
         _d = st7789.ST7789(
             SPI(1, baudrate=db.BAUDRATE, sck=Pin("DISPLAY_SCK"), mosi=Pin("DISPLAY_MOSI")),
             W, H,
@@ -86,13 +86,12 @@ def _bypass(on):
 
 
 def _text(s, x, y, font, fg, bg):
-    from DisplayBase import smoothtext
-    return smoothtext.draw(_d, s, x, y, font, fg, bg)
+    return _d.text(font, s, x, y, fg, bg)
 
 
 def _width(s, font):
-    from DisplayBase import smoothtext
-    return smoothtext.width(s, font)
+    chars, adv = font.CHARS, font.ADV
+    return sum(adv[max(0, chars.find(c))] for c in s)
 
 
 def _center(s, y, font, fg, bg):
@@ -193,7 +192,7 @@ def _paint_running(v):
 
 def _paint_bar(v):
     _d.fill_rect(0, 0, W, BAR_H - 1, WHITE)
-    _text(_name[:24], 40, 0, _fonts.small_bold, INK, WHITE)
+    _text(_name[:24], 40, 0, _fonts.small, INK, WHITE)
     _d.hline(0, BAR_H - 1, W, INK)
     _paint_icon(v)
     _paint_link(v)

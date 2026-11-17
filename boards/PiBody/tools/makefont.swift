@@ -1,12 +1,14 @@
 // Renders a TrueType font into a smooth (anti-aliased, 4 bits per pixel)
-// bitmap font module for the PiBody display (DisplayBase/smoothtext.py).
+// bitmap font module for the PiBody display (drawn by st7789 text()).
 //
 //   swift makefont.swift --list font.ttf...            print PostScript names
 //   swift makefont.swift font.ttf SIZE out.py [NAME]   write a font module
+//   swift makefont.swift font.ttf hN out.py [NAME]     largest size with N-row lines
 //
-// Characters: ASCII 32..126, Russian Cyrillic (А..я, Ё, ё) and the Kazakh letters
-// (when the font has them). Glyphs are cropped to their ink, advances are
-// rounded to whole pixels. Module fields: NAME, HEIGHT, BASELINE, CHARS (str),
+// Characters: ASCII 32..126, Cyrillic U+0400..U+045F and the Kazakh, Tajik, Tatar
+// and Bashkir letters (when the font has them). Glyphs are cropped to their ink,
+// advances are rounded to whole pixels. Module fields: NAME, HEIGHT, BASELINE,
+// WIDTH (widest ASCII advance), CHARS (str),
 // ADV, XOFF (bearing + 128), GW (bitmap width), YOFF (first inked row), GH
 // (inked rows), OFFS (uint16 LE byte offsets into BITMAP), BITMAP (nibbles,
 // high first, row-major, GH rows per glyph).
@@ -27,22 +29,47 @@ if args.first == "--list" {
     }
     exit(0)
 }
-guard args.count >= 3, let size = Double(args[1]) else {
-    print("usage: makefont.swift font.ttf SIZE out.py [NAME]"); exit(2)
+// SIZE is the em size in pixels, or hN: the largest size whose glyphs fit N rows
+let fit = args.count >= 3 && args[1].hasPrefix("h") ? Int(args[1].dropFirst()) : nil
+guard args.count >= 3, let size = fit != nil ? 8.0 : Double(args[1]) else {
+    print("usage: makefont.swift font.ttf SIZE|hN out.py [NAME]"); exit(2)
 }
-let font = load(args[0], CGFloat(size))
-let name = args.count > 3 ? args[3] : "\(CTFontCopyPostScriptName(font)) \(args[1])"
+func box(_ f: CTFont, _ cs: [UniChar]) -> (Int, Int) {
+    var gs = [CGGlyph](repeating: 0, count: cs.count)
+    var cc = cs
+    _ = CTFontGetGlyphsForCharacters(f, &cc, &gs, cs.count)
+    var rs = [CGRect](repeating: .zero, count: gs.count)
+    CTFontGetBoundingRectsForGlyphs(f, .horizontal, gs, &rs, gs.count)
+    let ink = rs.filter { !$0.isEmpty }
+    return (Int(ceil(ink.map { $0.maxY }.max()!)), Int(floor(ink.map { $0.minY }.min()!)))
+}
+var font = load(args[0], CGFloat(size))
+var name: String { args.count > 3 ? args[3] : "\(CTFontCopyPostScriptName(font)) \(CTFontGetSize(font))" }
 
 var chars: [UniChar] = Array(32...126)
-chars += [0x0401] + Array(0x0410...0x044F) + [0x0451]
-// Kazakh: Ә ә Ғ ғ Қ қ Ң ң Ө ө Ұ ұ Ү ү Һ һ І і
-chars += [0x04D8, 0x04D9, 0x0492, 0x0493, 0x049A, 0x049B, 0x04A2, 0x04A3,
-          0x04E8, 0x04E9, 0x04B0, 0x04B1, 0x04AE, 0x04AF, 0x04BA, 0x04BB, 0x0406, 0x0456]
+// Cyrillic U+0400..U+045F: Russian, Ukrainian, Belarusian, Serbian, Bulgarian, Macedonian
+chars += Array(0x0400...0x045F)
+// Central Asian and Volga letters: Kazakh Ә Ғ Қ Ң Ө Ұ Ү Һ, Tajik Ӣ Ӯ Ҳ Ҷ,
+// Tatar Җ, Bashkir Ҙ Ҡ Ҫ (upper and lower case)
+for c in [0x04D8, 0x0492, 0x049A, 0x04A2, 0x04E8, 0x04B0, 0x04AE, 0x04BA,
+          0x04E2, 0x04EE, 0x04B2, 0x04B6, 0x0496, 0x0498, 0x04A0, 0x04AA] {
+    chars += [UniChar(c), UniChar(c + 1)]
+}
 var glyphs = [CGGlyph](repeating: 0, count: chars.count)
 for (i, c) in chars.enumerated() {
     var cc = c
     var g: CGGlyph = 0
     if CTFontGetGlyphsForCharacters(font, &cc, &g, 1) { glyphs[i] = g }
+}
+if let target = fit {
+    var s = 8.0
+    while true {
+        let f = load(args[0], CGFloat(s + 0.25))
+        let (t, b) = box(f, chars)
+        if t - b > target { break }
+        s += 0.25
+    }
+    font = load(args[0], CGFloat(s))
 }
 // drop characters the font lacks (except space)
 let keep = chars.indices.filter { glyphs[$0] != 0 || chars[$0] == 32 }
@@ -56,8 +83,9 @@ var advs = [CGSize](repeating: .zero, count: glyphs.count)
 CTFontGetAdvancesForGlyphs(font, .horizontal, glyphs, &advs, glyphs.count)
 let top = Int(ceil(rects.map { $0.maxY }.max()!))
 let bottom = Int(floor(rects.map { $0.minY }.min()!))
-let height = top - bottom
-let baseline = top
+let pad = fit != nil ? max(0, fit! - (top - bottom)) : 0
+let height = top - bottom + pad
+let baseline = top + pad / 2
 
 var adv = [UInt8](), xoff = [UInt8](), gw = [UInt8](), offs = [UInt8](), bitmap = [UInt8]()
 var yoff = [UInt8](), gh = [UInt8]()
@@ -83,7 +111,7 @@ for (i, g) in glyphs.enumerated() {
     ctx.setAllowsFontSubpixelQuantization(false)
     ctx.setFillColor(gray: 1, alpha: 1)
     var gg = g
-    var pos = CGPoint(x: CGFloat(-x0), y: CGFloat(-bottom))
+    var pos = CGPoint(x: CGFloat(-x0), y: CGFloat(-bottom + (pad - pad / 2)))
     CTFontDrawGlyphs(font, &gg, &pos, 1, ctx)
     // CGContext rows run bottom-up in memory? No: row 0 is the top row.
     var nib = [UInt8]()
@@ -114,9 +142,11 @@ func lit(_ b: [UInt8]) -> String {
 let text = String(utf16CodeUnits: chars, count: chars.count)
     .replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
 var out = "# Generated by tools/makefont.swift from \(name) (Apache-2.0 font). Do not edit.\n"
-out += "NAME = \"\(name)\"\nHEIGHT = \(height)\nBASELINE = \(baseline)\n"
+// WIDTH: widest ASCII advance, for code that counts characters per line
+let maxw = chars.indices.filter { chars[$0] < 127 }.map { Int(adv[$0]) }.max()!
+out += "NAME = \"\(name)\"\nHEIGHT = \(height)\nBASELINE = \(baseline)\nWIDTH = \(maxw)\n"
 out += "CHARS = \"\(text)\"\n"
 out += "ADV = \(lit(adv))\nXOFF = \(lit(xoff))\nGW = \(lit(gw))\nYOFF = \(lit(yoff))\nGH = \(lit(gh))\nOFFS = \(lit(offs))\n"
 out += "BITMAP =\\\n\(lit(bitmap))\n"
 try! out.write(toFile: args[2], atomically: true, encoding: .utf8)
-print("\(name): height \(height), \(chars.count) glyphs, \(bitmap.count) bytes")
+print("\(name): em \(CTFontGetSize(font)) px, height \(height), \(chars.count) glyphs, \(bitmap.count) bytes")
