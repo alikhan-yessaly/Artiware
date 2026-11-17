@@ -36,10 +36,10 @@ def _lut(fg, bg):
 
 
 @micropython.viper
-def _put(alpha: ptr8, aw: int, x0: int, bmp: ptr8, off: int, gw: int, gh: int):
+def _put(alpha: ptr8, aw: int, x0: int, bmp: ptr8, off: int, gw: int, y0: int, gh: int):
     i = 0
     for y in range(gh):
-        row = y * aw + x0
+        row = (y0 + y) * aw + x0
         for x in range(gw):
             b = int(bmp[off + (i >> 1)])
             v = (b >> 4) if (i & 1) == 0 else (b & 15)
@@ -103,9 +103,9 @@ def draw(dev, s, x, y, font, fg=0xFFFF, bg=0x0000, screen_w=240):
     if aw <= 0:
         return x
     alpha = bytearray(aw * h)
-    offs, gw, bmp = font.OFFS, font.GW, font.BITMAP
+    offs, gw, bmp, yoff, gh = font.OFFS, font.GW, font.BITMAP, font.YOFF, font.GH
     for i, gx in glyphs:
-        _put(alpha, aw, gx - left, bmp, offs[2 * i] | offs[2 * i + 1] << 8, gw[i], h)
+        _put(alpha, aw, gx - left, bmp, offs[2 * i] | offs[2 * i + 1] << 8, gw[i], yoff[i], gh[i])
     # crop to the screen
     sx = x + left
     cx = 0
