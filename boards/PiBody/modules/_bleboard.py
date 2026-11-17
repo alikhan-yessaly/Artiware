@@ -109,25 +109,9 @@ def _chip(s, y, dot, tint):
     _text(s, x + r + 13, y + r - f.HEIGHT // 2 + 1, f, INK, tint)
 
 
-def _poly(cx, cy, r, n, bump, color, angle_offset=None):
-    """Same shape as pibody Display.draw_polygon (used by the Artisan logo)."""
-    import math
-    step = 360 / n
-    if angle_offset is None:
-        angle_offset = step / 2 if n % 2 == 0 else 90
-    k = math.pi / 180
-    pts = []
-    a = 0
-    for _ in range(n + 1):
-        dx = cx + r * math.cos(k * (a - angle_offset))
-        dy = cy + r * math.sin(k * (a - angle_offset))
-        a += step
-        ddx = cx + r * math.cos(k * (a - angle_offset))
-        ddy = cy + r * math.sin(k * (a - angle_offset))
-        pts.append((round(dx), round(dy)))
-        pts.append((round(cx + (dx + (ddx - dx) / 2 - cx) * bump),
-                    round(cy + (dy + (ddy - dy) / 2 - cy) * bump)))
-    _d.fill_polygon(pts, 0, 0, color)
+def _logo_mark(cx, cy, r):
+    from DisplayBase import artisan_logo
+    artisan_logo(_d, cx, cy, r, BLACK, WHITE)
 
 
 # --- painting (always with the overlay bypass on) ----------------------------
@@ -220,8 +204,7 @@ HINT_Y = 288
 
 def _paint_logo(v):
     _d.fill(WHITE)
-    _poly(120, LOGO_Y, 68, 8, 0.7, BLACK)
-    _poly(120, LOGO_Y, 48, 4, 0.3, WHITE, angle_offset=0)
+    _logo_mark(120, LOGO_Y, 68)
     _center(_name[:20], NAME_Y, _fonts.large, INK, WHITE)
     _paint_logo_status(v)
 
@@ -387,8 +370,7 @@ def feedback(stage):
     _panel()
     import json
     _d.fill(WHITE)
-    _poly(120, 100, 52, 8, 0.7, BLACK)
-    _poly(120, 100, 37, 4, 0.3, WHITE, angle_offset=0)
+    _logo_mark(120, 100, 52)
     f = _fonts
     if stage == "safe":
         try:

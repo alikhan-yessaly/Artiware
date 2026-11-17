@@ -200,6 +200,54 @@ def _make_st7789():
                     for px in range(nodes[k], nodes[k + 1] + 1):
                         put(px + x, py + y, c)
 
+        def fill_shapes(self, bx, by, bw, bh, bg, shapes):
+            """Same coverage as st7789.c fill_shapes (4 sub-rows, span overlap)."""
+            def blend(b, f, a):
+                out = 0
+                for sh, m in ((11, 31), (5, 63), (0, 31)):
+                    cb, cf = b >> sh & m, f >> sh & m
+                    out |= (cb + (((cf - cb) * a + 128) >> 8)) << sh
+                return out
+            bx0, by0 = max(0, bx), max(0, by)
+            bx1, by1 = min(W, bx + bw), min(H, by + bh)
+            w = bx1 - bx0
+            box = [[bg] * w for _ in range(by1 - by0)]
+            for pts, color in shapes:
+                n = len(pts)
+                for y in range(by0, by1):
+                    cov = [0] * w
+                    for sub in range(4):
+                        fy = y + (sub + 0.5) / 4
+                        xs = []
+                        for i in range(n):
+                            (x0, y0), (x1, y1) = pts[i], pts[(i + 1) % n]
+                            if (y0 <= fy < y1) or (y1 <= fy < y0):
+                                xs.append(x0 + (fy - y0) * (x1 - x0) / (y1 - y0))
+                        xs.sort()
+                        for i in range(0, len(xs) - 1, 2):
+                            xa, xb = max(0, xs[i] - bx0), min(w, xs[i + 1] - bx0)
+                            if xb <= xa:
+                                continue
+                            pa, pb = int(xa), int(xb)
+                            if pa == pb:
+                                cov[pa] += int((xb - xa) * 64 + 0.5)
+                                continue
+                            cov[pa] += int((pa + 1 - xa) * 64 + 0.5)
+                            for q in range(pa + 1, pb):
+                                cov[q] += 64
+                            if pb < w:
+                                cov[pb] += int((xb - pb) * 64 + 0.5)
+                    row = box[y - by0]
+                    for q in range(w):
+                        c = min(256, cov[q])
+                        if c >= 255:
+                            row[q] = color
+                        elif c:
+                            row[q] = blend(row[q], color, c)
+            for r, row in enumerate(box):
+                for q, c in enumerate(row):
+                    put(bx0 + q, by0 + r, c)
+
         def clear(self):
             self.fill(0)
 

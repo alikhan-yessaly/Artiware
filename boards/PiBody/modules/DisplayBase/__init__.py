@@ -9,6 +9,32 @@ BAUDRATE = 60_000_000
 WIDTH = 240
 HEIGHT = 320
 
+def star_points(cx, cy, r, n, bump, angle_offset=None):
+    """Points of the Artisan logo's star shapes (float, closed)."""
+    import math
+    step = 360 / n
+    if angle_offset is None:
+        angle_offset = step / 2 if n % 2 == 0 else 90
+    k = math.pi / 180
+    pts = []
+    for i in range(n):
+        a = k * (i * step - angle_offset)
+        b = k * ((i + 1) * step - angle_offset)
+        dx, dy = cx + r * math.cos(a), cy + r * math.sin(a)
+        ex, ey = cx + r * math.cos(b), cy + r * math.sin(b)
+        pts.append((dx, dy))
+        pts.append((cx + ((dx + ex) / 2 - cx) * bump, cy + ((dy + ey) / 2 - cy) * bump))
+    return pts
+
+
+def artisan_logo(dev, cx, cy, r, fg=0x0000, bg=0xFFFF):
+    """The Artisan logo with smooth edges, centred on cx, cy, radius r, drawn
+    on a bg square (2r+4 wide)."""
+    dev.fill_shapes(round(cx - r) - 2, round(cy - r) - 2, round(2 * r) + 5, round(2 * r) + 5, bg, (
+        (star_points(cx, cy, r, 8, 0.7), fg),
+        (star_points(cx, cy, r * 0.7, 4, 0.3, 0), bg)))
+
+
 class _NoBar:
     HEIGHT = 0
     mode = "off"

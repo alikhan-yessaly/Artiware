@@ -2574,6 +2574,167 @@ static mp_obj_t st7789_ST7789_fill_polygon(size_t n_args, const mp_obj_t *args) 
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(st7789_ST7789_fill_polygon_obj, 4, 8, st7789_ST7789_fill_polygon);
 
+
+// --- Anti-aliased shapes ---------------------------------------------------
+// fill_shapes(x, y, w, h, bg, shapes): the box x, y, w, h filled with bg, then
+// each (points, color) in shapes drawn over it in order: a filled polygon
+// (even-odd rule, float or int screen coordinates, closed automatically) with
+// smooth edges. Coverage: 4 sub-rows a pixel, exact horizontal span overlap.
+// Drawn in strips through the resident buffer (one blit each).
+
+#define AA_SUB 4
+
+static int cmp_float(const void *a, const void *b) {
+    float d = *(const float *)a - *(const float *)b;
+    return (d > 0) - (d < 0);
+}
+
+static inline uint16_t blend565(uint16_t b, uint16_t f, int a) {  // a 0..256
+    int br = b >> 11, bg = (b >> 5) & 0x3F, bb = b & 0x1F;
+    int fr = f >> 11, fg = (f >> 5) & 0x3F, fb = f & 0x1F;
+    return ((br + (((fr - br) * a + 128) >> 8)) << 11)
+           | ((bg + (((fg - bg) * a + 128) >> 8)) << 5)
+           | (bb + (((fb - bb) * a + 128) >> 8));
+}
+
+static mp_obj_t st7789_ST7789_fill_shapes(size_t n_args, const mp_obj_t *args) {
+    st7789_ST7789_obj_t *self = MP_OBJ_TO_PTR(args[0]);
+    int bx0 = mp_obj_get_int(args[1]), by0 = mp_obj_get_int(args[2]);
+    int bx1 = bx0 + mp_obj_get_int(args[3]), by1 = by0 + mp_obj_get_int(args[4]);
+    uint16_t bg = mp_obj_get_int(args[5]);
+    size_t ns;
+    mp_obj_t *shapes;
+    mp_obj_get_array(args[6], &ns, &shapes);
+    if (bx0 < 0) bx0 = 0;
+    if (by0 < 0) by0 = 0;
+    if (bx1 > self->width) bx1 = self->width;
+    if (by1 > self->height) by1 = self->height;
+    int w = bx1 - bx0;
+    if (w <= 0 || by1 <= by0 || ns == 0) {
+        return mp_const_none;
+    }
+
+    // all points as floats: shape k uses pts[start[k] .. start[k+1])
+    size_t total = 0;
+    for (size_t k = 0; k < ns; k++) {
+        size_t two, np;
+        mp_obj_t *sh, *pl;
+        mp_obj_get_array(shapes[k], &two, &sh);
+        if (two != 2) {
+            mp_raise_ValueError(MP_ERROR_TEXT("shape must be (points, color)"));
+        }
+        mp_obj_get_array(sh[0], &np, &pl);
+        total += np;
+    }
+    float *px = m_new(float, 2 * total);
+    float *py = px + total;
+    size_t *start = m_new(size_t, ns + 1);
+    uint16_t *color = m_new(uint16_t, ns);
+    size_t maxn = 0;
+    total = 0;
+    for (size_t k = 0; k < ns; k++) {
+        size_t two, np;
+        mp_obj_t *sh, *pl;
+        mp_obj_get_array(shapes[k], &two, &sh);
+        mp_obj_get_array(sh[0], &np, &pl);
+        color[k] = mp_obj_get_int(sh[1]);
+        start[k] = total;
+        for (size_t i = 0; i < np; i++) {
+            size_t two2;
+            mp_obj_t *xy;
+            mp_obj_get_array(pl[i], &two2, &xy);
+            px[total] = mp_obj_get_float(xy[0]);
+            py[total++] = mp_obj_get_float(xy[1]);
+        }
+        if (np > maxn) maxn = np;
+    }
+    start[ns] = total;
+    float *xs = m_new(float, maxn + 1);
+    uint16_t *cov = m_new(uint16_t, w);  // 0..256 per pixel
+
+    size_t cap = self->buffer_size / 2;
+    uint16_t *buf = self->i2c_buffer;
+    if (cap < (size_t)w || buf == NULL) {
+        cap = (size_t)w * 8;
+        buf = m_new(uint16_t, cap);
+    }
+    int strip = cap / w;
+    for (int sy0 = by0; sy0 < by1; sy0 += strip) {
+        int sy1 = sy0 + strip < by1 ? sy0 + strip : by1;
+        for (int i = 0; i < w * (sy1 - sy0); i++) {
+            buf[i] = bg;
+        }
+        for (size_t k = 0; k < ns; k++) {
+            size_t a = start[k], n = start[k + 1] - a;
+            if (n < 3) continue;
+            for (int y = sy0; y < sy1; y++) {
+                memset(cov, 0, w * 2);
+                bool any = false;
+                for (int s = 0; s < AA_SUB; s++) {
+                    float fy = y + (s + 0.5f) / AA_SUB;
+                    int nx = 0;
+                    for (size_t i = 0; i < n; i++) {
+                        size_t j = i + 1 < n ? i + 1 : 0;
+                        float y0 = py[a + i], y1 = py[a + j];
+                        if ((y0 <= fy && y1 > fy) || (y1 <= fy && y0 > fy)) {
+                            xs[nx++] = px[a + i] + (fy - y0) * (px[a + j] - px[a + i]) / (y1 - y0);
+                        }
+                    }
+                    if (nx < 2) continue;
+                    qsort(xs, nx, sizeof(float), cmp_float);
+                    for (int i = 0; i + 1 < nx; i += 2) {
+                        float xa = xs[i] - bx0, xb = xs[i + 1] - bx0;
+                        if (xa < 0) xa = 0;
+                        if (xb > w) xb = w;
+                        if (xb <= xa) continue;
+                        any = true;
+                        int pa = (int)xa, pb = (int)xb;
+                        if (pa == pb) {
+                            cov[pa] += (int)((xb - xa) * (256 / AA_SUB) + 0.5f);
+                            continue;
+                        }
+                        cov[pa] += (int)((pa + 1 - xa) * (256 / AA_SUB) + 0.5f);
+                        for (int q = pa + 1; q < pb; q++) {
+                            cov[q] += 256 / AA_SUB;
+                        }
+                        if (pb < w) {
+                            cov[pb] += (int)((xb - pb) * (256 / AA_SUB) + 0.5f);
+                        }
+                    }
+                }
+                if (!any) continue;
+                uint16_t *row = buf + (y - sy0) * w;
+                for (int q = 0; q < w; q++) {
+                    int c = cov[q] > 256 ? 256 : cov[q];
+                    if (c >= 255) {
+                        row[q] = color[k];
+                    } else if (c) {
+                        row[q] = blend565(row[q], color[k], c);
+                    }
+                }
+            }
+        }
+        for (int i = 0; i < w * (sy1 - sy0); i++) {
+            buf[i] = _swap_bytes(buf[i]);
+        }
+        set_window(self, bx0, sy0, bx1 - 1, sy1 - 1);
+        DC_HIGH();
+        CS_LOW();
+        write_data(self, (uint8_t *)buf, w * (sy1 - sy0) * 2);
+        CS_HIGH();
+    }
+    if (buf != self->i2c_buffer) {
+        m_del(uint16_t, buf, cap);
+    }
+    m_del(uint16_t, cov, w);
+    m_del(float, xs, maxn + 1);
+    m_del(uint16_t, color, ns);
+    m_del(float, px, 2 * start[ns]);
+    m_del(size_t, start, ns + 1);
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(st7789_ST7789_fill_shapes_obj, 7, 7, st7789_ST7789_fill_shapes);
+
 static mp_obj_t st7789_ST7789_bounding(size_t n_args, const mp_obj_t *args) {
     st7789_ST7789_obj_t *self = MP_OBJ_TO_PTR(args[0]);
 
@@ -2627,6 +2788,7 @@ static const mp_rom_map_elem_t st7789_ST7789_locals_dict_table[] = {
     {MP_ROM_QSTR(MP_QSTR_circle), MP_ROM_PTR(&st7789_ST7789_circle_obj)},
     {MP_ROM_QSTR(MP_QSTR_rect), MP_ROM_PTR(&st7789_ST7789_rect_obj)},
     {MP_ROM_QSTR(MP_QSTR_text), MP_ROM_PTR(&st7789_ST7789_text_obj)},
+    {MP_ROM_QSTR(MP_QSTR_fill_shapes), MP_ROM_PTR(&st7789_ST7789_fill_shapes_obj)},
     {MP_ROM_QSTR(MP_QSTR_rotation), MP_ROM_PTR(&st7789_ST7789_rotation_obj)},
     {MP_ROM_QSTR(MP_QSTR_width), MP_ROM_PTR(&st7789_ST7789_width_obj)},
     {MP_ROM_QSTR(MP_QSTR_height), MP_ROM_PTR(&st7789_ST7789_height_obj)},
