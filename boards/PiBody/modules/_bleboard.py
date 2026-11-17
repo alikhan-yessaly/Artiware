@@ -27,12 +27,19 @@ TICK_MS = 250
 W, H = 240, 320
 DOT = (226, 0, 14, 14)  # x, y, w, h of the dot area
 
-WHITE = 0xFFFF
-BLACK = 0x0000
-BLUE = 0x041F   # (0, 130, 255)
-GREEN = 0x0540  # (0, 170, 0)
-GREY = 0x8C51
-RED = 0xF800
+WHITE      = 0xFFFF  # (255, 255, 255)
+BLACK      = 0x0000  # (0, 0, 0)
+INK        = 0x18E4  # (28, 31, 38)
+MUTED      = 0x7BF1  # (120, 126, 138)
+LINE       = 0xD6DC  # (214, 218, 224)
+BLUE       = 0x0B9E  # (10, 112, 245)
+BLUE_TINT  = 0xE77F  # (228, 238, 254)
+GREEN      = 0x2DAA  # (40, 180, 80)
+GREEN_TINT = 0xDFBC  # (222, 245, 229)
+AMBER      = 0xF4A1  # (245, 150, 10)
+AMBER_TINT = 0xFF9A  # (254, 240, 215)
+RED        = 0xE186  # (230, 50, 50)
+GREY_BADGE = 0xC65A  # (196, 202, 212)
 
 # _bar_state() bits (bleterm.c)
 STARTED, LINK, AUTH, PAIRING, IDLE = 0x01, 0x02, 0x04, 0x08, 0x10
@@ -110,49 +117,64 @@ def _blinking(v):
     return bool(v & PAIRING) and not v & AUTH
 
 
-def _status_text(v):
+def _status(v):
+    """(text, dot colour, chip tint, hint) for the logo screen."""
     if v & AUTH:
-        return "Connected", GREEN
+        return "Connected", GREEN, GREEN_TINT, "Run code from the IDE"
     if v & LINK:
-        return "Connecting...", BLUE
+        return "Connecting", BLUE, BLUE_TINT, "Checking the IDE key"
     if v & PAIRING:
-        return "Waiting to pair", BLUE
-    return "Waiting for IDE", BLUE
+        return "Ready to pair", AMBER, AMBER_TINT, "Connect from the IDE"
+    return "Waiting for IDE", BLUE, BLUE_TINT, "Open the IDE to connect"
 
 
-def _paint_icon(v, x=4):
-    """Bluetooth rune (12x14) at x, blank in the off phase of a blink."""
-    _d.fill_rect(x, 0, 13, BAR_H - 1, WHITE)
-    if _blinking(v) and not _blink_on:
-        return
-    c = x + 5
-    for o in (0, 1):
-        _d.line(c + o, 1, c + o, 13, BLUE)
-        _d.line(c - 4 + o, 4, c + 4 + o, 10, BLUE)
-        _d.line(c + 4 + o, 10, c + o, 13, BLUE)
-        _d.line(c - 4 + o, 10, c + 4 + o, 4, BLUE)
-        _d.line(c + 4 + o, 4, c + o, 1, BLUE)
+def _pill(x, y, w, r, color):
+    """Rounded bar 2r+1 tall from x to x+w-1."""
+    _d.fill_rect(x + r, y, w - 2 * r, 2 * r + 1, color)
+    _d.fill_circle(x + r, y + r, r, color)
+    _d.fill_circle(x + w - 1 - r, y + r, r, color)
 
 
-def _paint_link(v, x=18):
-    """Green link mark next to the icon while the IDE is connected."""
-    _d.fill_rect(x, 0, 14, BAR_H - 1, WHITE)
+def _rune(cx, cy, color):
+    """Bluetooth rune, 7x11, centred on cx, cy."""
+    _d.vline(cx, cy - 5, 11, color)
+    _d.line(cx - 3, cy - 3, cx + 3, cy + 2, color)
+    _d.line(cx + 3, cy + 2, cx, cy + 5, color)
+    _d.line(cx - 3, cy + 3, cx + 3, cy - 2, color)
+    _d.line(cx + 3, cy - 2, cx, cy - 5, color)
+
+
+def _paint_icon(v, x=3):
+    """Bluetooth badge: blue circle with a white rune; pale while blinking off."""
+    _d.fill_rect(x, 0, 15, BAR_H - 1, WHITE)
+    off = _blinking(v) and not _blink_on
+    _d.fill_circle(x + 7, 7, 7, GREY_BADGE if off else BLUE)
+    _rune(x + 7, 7, WHITE)
+
+
+def _paint_link(v, x=20):
+    """Green link mark (two rings joined) while the IDE is connected."""
+    _d.fill_rect(x, 0, 16, BAR_H - 1, WHITE)
     if v & AUTH:
-        _d.fill_circle(x + 3, 7, 2, GREEN)
-        _d.fill_circle(x + 10, 7, 2, GREEN)
-        _d.fill_rect(x + 3, 6, 8, 3, GREEN)
+        _d.fill_circle(x + 4, 7, 3, GREEN)
+        _d.fill_circle(x + 11, 7, 3, GREEN)
+        _d.fill_rect(x + 4, 6, 7, 3, GREEN)
+        _d.fill_circle(x + 4, 7, 1, WHITE)
+        _d.fill_circle(x + 11, 7, 1, WHITE)
 
 
 def _paint_running(v):
-    _d.fill_rect(DOT[0], 0, DOT[2], BAR_H - 1, WHITE)
+    x = DOT[0]
+    _d.fill_rect(x, 0, DOT[2], BAR_H - 1, WHITE)
     if not v & IDLE:
-        _d.fill_circle(DOT[0] + 7, 7, 4, GREEN)
+        _d.fill_circle(x + 7, 7, 5, GREEN_TINT)
+        _d.fill_circle(x + 7, 7, 3, GREEN)
 
 
 def _paint_bar(v):
     _d.fill_rect(0, 0, W, BAR_H - 1, WHITE)
-    _text(_name[:23], 36, 0, _fonts.font_small, BLACK, WHITE)
-    _d.hline(0, BAR_H - 1, W, BLACK)
+    _text(_name[:22], 40, 0, _fonts.font_small, INK, WHITE)
+    _d.hline(0, BAR_H - 1, W, INK)
     _paint_icon(v)
     _paint_link(v)
     _paint_running(v)
@@ -164,25 +186,38 @@ def _paint_dot(v):
     if v & AUTH:
         color = GREEN
     elif _blinking(v) and not _blink_on:
-        color = WHITE
+        color = GREY_BADGE
     else:
         color = BLUE
     _d.fill_circle(cx, cy, 6, WHITE)
     _d.fill_circle(cx, cy, 5, color)
 
 
+LOGO_Y = 116
+NAME_Y = 204
+CHIP_Y = 242
+HINT_Y = 288
+
+
 def _paint_logo(v):
     _d.fill(WHITE)
-    _poly(120, 120, 70, 8, 0.7, BLACK)
-    _poly(120, 120, 49, 4, 0.3, WHITE, angle_offset=0)
-    _center(_name[:15], 214, _fonts.font_bold, BLACK, WHITE)
+    _poly(120, LOGO_Y, 68, 8, 0.7, BLACK)
+    _poly(120, LOGO_Y, 48, 4, 0.3, WHITE, angle_offset=0)
+    _center(_name[:20], NAME_Y, _fonts.font_large, INK, WHITE)
     _paint_logo_status(v)
 
 
 def _paint_logo_status(v):
-    _d.fill_rect(0, 256, W, 24, WHITE)
-    s, color = _status_text(v)
-    _center(s, 258, _fonts.font_medium, color, WHITE)
+    s, dot, tint, hint = _status(v)
+    f = _fonts.font_medium
+    _d.fill_rect(0, CHIP_Y, W, H - CHIP_Y, WHITE)
+    r = 14
+    w = len(s) * f.WIDTH + 2 * r + 18
+    x = (W - w) // 2
+    _pill(x, CHIP_Y, w, r, tint)
+    _d.fill_circle(x + r + 3, CHIP_Y + r, 4, dot)
+    _text(s, x + r + 14, CHIP_Y + r - f.HEIGHT // 2 + 1, f, INK, tint)
+    _center(hint, HINT_Y, _fonts.font_small, MUTED, WHITE)
 
 
 def _clear_bar_area():
@@ -333,22 +368,36 @@ def config(cfg):
 
 def feedback(stage):
     """Boot button held past a threshold: say what releasing it will do."""
+    global _d
     if not _cfg_display:
         return
-    d = _panel()
+    _panel()
+    import json
+    _d.fill(WHITE)
+    _poly(120, 100, 52, 8, 0.7, BLACK)
+    _poly(120, 100, 37, 4, 0.3, WHITE, angle_offset=0)
     f = _fonts
-    d.fill(WHITE)
     if stage == "safe":
-        import json
         try:
             on = json.loads(open("/ble_config.json").read()).get("ble_on_boot", False)
         except Exception:
             on = False
-        _center("Release for", 120, f.font_medium, BLACK, WHITE)
-        _center("BLE mode " + ("OFF" if on else "ON"), 150, f.font_bold, RED if on else BLUE, WHITE)
-        _center("Hold 5 s: pairing", 220, f.font_small, GREY, WHITE)
+        _center("Release now for", 178, f.font_small, MUTED, WHITE)
+        s, dot, tint = ("Bluetooth OFF", RED, AMBER_TINT) if on else ("Bluetooth ON", BLUE, BLUE_TINT)
+        hint = "Back to USB only" if on else "Code over Bluetooth"
     else:
-        _center("Pairing mode", 150, f.font_bold, BLUE, WHITE)
+        _center("Release now for", 178, f.font_small, MUTED, WHITE)
+        s, dot, tint, hint = "Pairing", AMBER, AMBER_TINT, "Open for 60 seconds"
+    r = 14
+    fm = f.font_medium
+    w = len(s) * fm.WIDTH + 2 * r + 18
+    x = (W - w) // 2
+    _pill(x, 204, w, r, tint)
+    _d.fill_circle(x + r + 3, 204 + r, 4, dot)
+    _text(s, x + r + 14, 204 + r - fm.HEIGHT // 2 + 1, fm, INK, tint)
+    _center(hint, 250, f.font_small, MUTED, WHITE)
+    if stage == "safe":
+        _center("Keep holding 5 s: pairing", 290, f.font_small, MUTED, WHITE)
 
 
 def status(cfg, entered=False):
